@@ -1,0 +1,137 @@
+#!/usr/bin/perl
+
+use Socket;
+use File::MimeInfo;
+
+# On conserve la commande (start, stop, status)
+$cmd = $ARGV[0];
+
+# On sort si la commande n'est pas correcte
+die "Usage: $0 <start|stop|status>\n" if (!($cmd eq "start" or $cmd eq "stop" or $cmd eq "status"));
+
+# Version du serveur
+$SERVER_VERSION = "blackPerl v1.0";
+
+# Map qui contient les codes HTTP avec leur erreur HTTP
+%HTTP;
+$HTTP{200} = "OK";
+$HTTP{400} = "Bad Request";
+$HTTP{403} = "Forbidden";
+$HTTP{404} = "Not Found";
+$HTTP{405} = "Method Not Allowed";
+$HTTP{415} = "Unsupported Media Type";
+$HTTP{503} = "Service Unavailable";
+$HTTP{505} = "HTTP Version Not Supported";
+
+# Map qui contient la configuration du serveur
+%conf;
+
+# Liste des clients connectés sur le serveur
+@clients = ();
+
+# Charge la configuration du serveur
+sub loadConfig()
+{
+	$log = "[Erreur de configuration]";
+	open CONFIG, "comanche.conf" or die "open: $!\n";
+	while(<CONFIG>)
+	{
+		# La ligne est du type "set <key> <value>"
+		if (/^set\s+(.+)\s+(.+)$/)
+		{
+			($key, $val) = ($1, $2);
+			# La clé peut valoir (port, error, index, logfile, clients)
+			if ($key eq "port")
+			{
+				die "$log Port invalide (le port doit etre compris entre 1 et 65535)\n" unless($val =~ /\d+/ && $val >= 1 && $val <= 65535);
+			}
+			elsif ($key eq "error")
+			{
+				die	"$log Fichier d'erreur introuvable\n" unless(-f $val);
+			}
+			elsif ($key eq "clients")
+			{
+				die("$log Nombre de clients invalide (requiert un entier) \n") unless($val =~ /\d+/);
+			}
+			# A ne pas vérifier car vérification dynamique pendant l'utilisation du serveur
+			# elsif ($key eq "index") {}
+			# elsif ($key eq "logfile") {}
+			$conf{"sets"}{$key} = $val;
+		}
+		# La ligne est du type "route <regex> to <regex>"
+		elsif (/^route\s+(.+?)\s+to+\s+(.+)/)
+		{
+			($key, $val) = ($1, $2);
+			$conf{"routes"}{$key} = $val;
+			push @{$conf{"rules"}}, $key;
+		}
+		# La ligne est du type "exec <regex> to <regex>"
+		elsif (/^exec\s+(.+?)\s+from\s+(.+)/)
+		{
+			($key, $val) = ($1, $2);
+			$conf{"exec"}{$key} = $val;
+			push @{$conf{"rules"}}, $key;
+		}
+	}
+	close(CONFIG) or die "close: $!\n";	
+}
+
+# Envoie un fichier au client (code HTTP 200)
+sub sendFile
+{
+	$buffer = "";
+	$length = 100;
+	$code = 200;
+	$response = $HTTP[$code];
+	$file = $_[0];
+	open FILE, $file;
+	print CLIENT "HTTP/1.1 $code $response\r\n" .
+				"Content-Type: " . mimetype($file) . "\r\n" .
+				"Content-Length: " . (-s $file) . "\r\n\r\n";
+	while (read(FILE, $buffer, $length))
+	{
+		print $buffer;
+	}
+	close CLIENT;
+	exit 0;
+}
+
+# Envoie une erreur HTTP au client via le code HTTP en paramètre
+sub sendError
+{
+	$code = $_[0];
+	$error = $HTTP[$code];
+	$html = "<html><head><title>$error</title></head><body><h1>$error</h1><hr><p>$SERVER_VERSION</p></body></html>";
+	
+	print CLIENT "HTTP/1.1 $code $error\r\n" .
+				"Content-Type: text/html\r\n" .
+				"Content-Length: " . length($html) . "\r\n\r\n"
+				. $html;
+	close CLIENT;
+	exit 0;
+}
+
+# Arrête le serveur
+sub stop { print "stop\n"; }
+
+# Affiche le status du serveur
+sub status { print "status\n"; }
+
+# Démarre le serveur
+sub start { print "start\n"; }
+
+
+# Chargement de la configuration
+loadConfig();
+
+if ($cmd eq "start")
+{
+	start();
+}
+elsif ($cmd eq "stop")
+{
+	stop();
+}
+else {
+	status();
+}
