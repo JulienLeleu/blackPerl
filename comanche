@@ -9,8 +9,18 @@ $cmd = $ARGV[0];
 # On sort si la commande n'est pas correcte
 die "Usage: $0 <start|stop|status>\n" if (!($cmd eq "start" or $cmd eq "stop" or $cmd eq "status"));
 
+# Nom du serveur
+$SERVER_NAME = "blackPerl";
+
 # Version du serveur
 $SERVER_VERSION = "blackPerl v1.0";
+
+# Ports minimal et maximal
+$PORT_MIN = 1;
+$PORT_MAX = 65535;
+
+# Port de contrôle pour la commande status
+$PORT_CONTROL = 12345;
 
 # Map qui contient les codes HTTP avec leur erreur HTTP
 %HTTP;
@@ -22,6 +32,7 @@ $HTTP{405} = "Method Not Allowed";
 $HTTP{415} = "Unsupported Media Type";
 $HTTP{503} = "Service Unavailable";
 $HTTP{505} = "HTTP Version Not Supported";
+$HTTP{401} = "ENCULE";
 
 # Map qui contient la configuration du serveur
 %conf;
@@ -29,10 +40,27 @@ $HTTP{505} = "HTTP Version Not Supported";
 # Liste des clients connectés sur le serveur
 @clients = ();
 
+# Les compteurs de requêtes pour le status
+$req_received = 0;
+$req_processed = 0;
+
+# Affiche le status du serveur
+sub status
+{
+	$, = ",";
+	print "Numéro de processus père : $$\n" .
+			"Requêtes :\n" .
+			"\treçues : $req_received \n" .
+			"\ttraitées : $req_processed \n" .
+			"Nombre de clients connectés : " . ($#client + 1) . "\n";
+	print @client;
+	close CLIENT;
+}
+
 # Charge la configuration du serveur
 sub loadConfig()
 {
-	$log = "[Erreur de configuration]";
+	$logger = "[Erreur de configuration]";
 	open CONFIG, "comanche.conf" or die "open: $!\n";
 	while(<CONFIG>)
 	{
@@ -43,15 +71,15 @@ sub loadConfig()
 			# La clé peut valoir (port, error, index, logfile, clients)
 			if ($key eq "port")
 			{
-				die "$log Port invalide (le port doit etre compris entre 1 et 65535)\n" unless($val =~ /\d+/ && $val >= 1 && $val <= 65535);
+				die "$logger Port $val invalide (le port doit etre compris entre $PORT_MIN et $PORT_MAX)\n" unless($val =~ /[\d+]/ && $val != $PORT_CONTROL && $val >=$PORT_MIN && val <= $PORT_MAX);
 			}
 			elsif ($key eq "error")
 			{
-				die	"$log Fichier d'erreur introuvable\n" unless(-f $val);
+				die	"$logger Fichier d'erreur introuvable\n" unless(-f $val);
 			}
 			elsif ($key eq "clients")
 			{
-				die("$log Nombre de clients invalide (requiert un entier) \n") unless($val =~ /\d+/);
+				die("$logger Nombre de clients invalide (requiert un entier) \n") unless($val =~ /\d+/);
 			}
 			# A ne pas vérifier car vérification dynamique pendant l'utilisation du serveur
 			# elsif ($key eq "index") {}
@@ -70,10 +98,93 @@ sub loadConfig()
 		{
 			($key, $val) = ($1, $2);
 			$conf{"exec"}{$key} = $val;
+			# On envoit la clé dans une map générale de clé "rules"
 			push @{$conf{"rules"}}, $key;
 		}
 	}
 	close(CONFIG) or die "close: $!\n";	
+}
+
+# Récupère la date locale formatée du serveur
+sub getDate
+{
+	my ($s, $mn, $h, $j, $m, $a) = localtime(time);
+
+	#Formatage de la date (ajouter de 0 si inferieur a 10)
+	$j	= sprintf("%.2d", $j);
+	$s  = sprintf("%.2d", $s);
+	$mn = sprintf("%.2d", $mn);
+	$h  = sprintf("%.2d", $h);
+	$a	= $a + 1900;
+
+	#retourne la date sous la forme "J Mois AAAA - h:mn:s"
+	return "$j/$m/$a - $h:$mn:$s";
+}
+
+# Permet d'ajouter les événements au fichier de log définit dans la configuration
+sub log
+{
+	open LOG, ">>" . $conf{"sets"}{"logfile"}; # Pas de or die pour le log
+	$, = ";";
+	print LOG getDate(), ": ", @_, "\n";
+	close(LOG); # Pas de or die pour le log
+}
+
+# Récupère la route configurée et associée à la requête HTTP
+sub getRoute
+{
+	$req = $_[0];
+	# Parcours de toutes les règles de réécriture (routes & exec)
+	for $route (@{$conf{"rules"}})
+	{
+		if ($req =~ /$route/)
+		{
+			if (exists $conf{"routes"}{$route})
+			{
+				return ("route", $route,  $conf{"routes"}{$route});
+			}
+			elsif (exists $conf{"exec"}{$route})
+			{
+				return ("exec", $route, $conf{"exec"}{$route});
+			}
+		}
+	}
+	# Si on ne trouve aucun résultat, on renvoie une erreur 404
+	sendError(404);
+}
+
+# Récupère le chemin réel d'un fichier demandé par la requête HTTP 
+sub getRealPath
+{
+	# Retourne un tableau avec les informations sur la position du fichier dans le système de fichiers
+	my @route = getRoute($_[0]);
+	# On affecte a param1 une expression qui peut etre utilisée a la place d'une expression perl
+	my $motif = qr/$route[1]/;
+	# On redefinie la variable par defaut
+	$_ = $_[0];
+	# On vérifie si la chaîne comporte le motif
+	my @matches = m/$motif/;
+	# On indique la route à prendre
+	my $r = $route[2];
+	for (@matches)
+	{
+		$m = $matches[$i++];
+		$r =~ s{\\$i}{$m};
+	}
+	m/$r/;
+
+	# Si la route à prendre est un dossier, on verifie l'existence d'un fichier par défaut à l'intérieur
+	if (-d $r)
+	{
+		$default_file = $r . $conf{"sets"}{"index"};
+		if (-f $default_file)
+		{
+			$r = $default_file;
+		}
+	}
+	
+	# On finit par retourner le type de route et la route
+	return ($route[0], $r);
 }
 
 # Envoie un fichier au client (code HTTP 200)
@@ -82,51 +193,158 @@ sub sendFile
 	$buffer = "";
 	$length = 100;
 	$code = 200;
-	$response = $HTTP[$code];
+	$response = $HTTP{$code};
 	$file = $_[0];
+	
 	open FILE, $file;
 	print CLIENT "HTTP/1.1 $code $response\r\n" .
 				"Content-Type: " . mimetype($file) . "\r\n" .
 				"Content-Length: " . (-s $file) . "\r\n\r\n";
 	while (read(FILE, $buffer, $length))
 	{
-		print $buffer;
+		print CLIENT $buffer;
 	}
 	close CLIENT;
-	exit 0;
 }
 
 # Envoie une erreur HTTP au client via le code HTTP en paramètre
 sub sendError
 {
 	$code = $_[0];
-	$error = $HTTP[$code];
-	$html = "<html><head><title>$error</title></head><body><h1>$error</h1><hr><p>$SERVER_VERSION</p></body></html>";
+	$error = $HTTP{$code};
+	$html = "<html>\r\n<head>\r\n<title>$error</title>\r\n</head>\r\n<body>\r\n<h1>$error</h1>\r\n<hr>\r\n<p>$SERVER_VERSION</p>\r\n</body>\r\n</html>\r\n\r\n";
 	
 	print CLIENT "HTTP/1.1 $code $error\r\n" .
-				"Content-Type: text/html\r\n" .
-				"Content-Length: " . length($html) . "\r\n\r\n"
-				. $html;
+			"Content-Type: text/html\r\n" .
+			"Content-Length: " . length($html) . "\r\n\r\n"
+			. $html;
 	close CLIENT;
-	exit 0;
+}
+
+# Envoie un dossier
+sub sendFolder
+{
+	$code = 200;
+	$response = $HTTP{$code};
+	$html = listFolder $_[0];
+	
+	print CLIENT "HTTP/1.1 $code $response\r\n" .
+			"Content-Type: text/html\r\n" .
+			"Content-Length: " . length($html) . "\r\n\r\n"
+			. $html;
+	close CLIENT;
+}
+
+# Génère une page pour la navigation des dossiers si le dossier ne contient pas de fichier par défaut (type index.html)
+sub listFolder
+{
+	$dir = $_[0];
+	@folder = split("/", $dir);
+	$parent = join('/', ($folder[0]..$folder[-1]));
+	my $reponse = "<html><head><title>$SERVER_NAME - $dir</title></head>". "<body><h1>Index of : $dir</h1><hr/><ul>";
+
+
+	opendir(REP,"$dir") or die "opendir: $!";
+	my @liste = readdir(REP);
+	# On supprime le dossier courant
+	@liste = grep {$_ ne "."} @liste;
+	# On supprime le dossier parent
+	@liste = grep {$_ ne ".."} @liste; 
+	closedir REP;
+
+	#pour tout les elements dans la liste
+	foreach (@liste)
+	{
+		if (-d $i) {
+			$reponse .= " <li><a href=$_\/> $_</a></li>\n";
+		}
+		else {
+			$reponse .= " <li><a href=$_> $_</a></li>\n";
+		}
+	}
+
+	$reponse .= "</ul><hr><p>$SERVER_VERSION</p></body></html>";
+	return $reponse;
+}
+
+# Formate une ligne de sorte que les \r et \n soit supprimé
+sub removeEOL
+{
+	return s/(\r|\n)+//g;
+}
+
+# Démarre le serveur
+sub run
+{	
+	loadConfig();
+	$port = $conf{"sets"}{"port"};
+	$caddr = sockaddr_in ($port, INADDR_ANY);
+	$proto = getprotobyname("tcp");
+	
+	socket (SERVER, PF_INET, SOCK_STREAM, $proto) or die ("socket: $!");
+	setsockopt (SERVER, SOL_SOCKET, SO_REUSEADDR, 1) or die ("setsockopt: $!");
+	bind (SERVER, $caddr) or die ("bind: $!");
+	listen (SERVER, SOMAXCONN) or die ("listen: $!");
+
+	for (;;)
+	{
+		accept (CLIENT, SERVER) or die ("accept: $!");
+		if (fork() == 0)
+		{
+			($get, $req, $http) = split(" ", scalar <CLIENT>);
+			
+			$http =~ removeEOL($http);
+			while (<CLIENT>)
+			{
+				removeEOL;
+				
+				if (not $_)
+				{
+					if ($get eq "GET" && $http eq "HTTP/1.1")
+					{
+						($route, $file) = getRealPath($req);
+						if (-e $file)
+						{
+							if (-d $file)
+							{
+								sendFolder($file);
+							}
+							else
+							{
+								sendFile($file);
+							}
+						}
+						else {
+							sendError(404);
+						}
+					}
+					else
+					{
+						sendError(400);
+					}
+					exit(0);
+				}
+			}
+		}
+		else {
+			close CLIENT;
+		}
+		do
+		{
+			$kid = waitpid(-1, WNOHANG);
+		} while ($kid > 0);
+	}
+	close SERVER;
+
+	print "Demarrer...", $port . "\n";
 }
 
 # Arrête le serveur
 sub stop { print "stop\n"; }
 
-# Affiche le status du serveur
-sub status { print "status\n"; }
-
-# Démarre le serveur
-sub start { print "start\n"; }
-
-
-# Chargement de la configuration
-loadConfig();
-
 if ($cmd eq "start")
 {
-	start();
+	run();
 }
 elsif ($cmd eq "stop")
 {
