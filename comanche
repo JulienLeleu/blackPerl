@@ -2,6 +2,7 @@
 
 use Socket;
 use File::MimeInfo;
+use POSIX qw(mkfifo);
 
 # On conserve la commande (start, stop, status)
 $cmd = $ARGV[0];
@@ -32,7 +33,6 @@ $HTTP{405} = "Method Not Allowed";
 $HTTP{415} = "Unsupported Media Type";
 $HTTP{503} = "Service Unavailable";
 $HTTP{505} = "HTTP Version Not Supported";
-$HTTP{401} = "ENCULE";
 
 # Map qui contient la configuration du serveur
 %conf;
@@ -44,21 +44,48 @@ $HTTP{401} = "ENCULE";
 $req_received = 0;
 $req_processed = 0;
 
+#Definition de la fifo (pipe) pour la lecture/ecriture des statuts
+$fifo = '/tmp/blackPerl.fifo';
+mkfifo($fifo, 0666);
+# On stocke le processus du serveur (le père)
+$filePid = '.serv_pid';
+$servPid;
+
 # Affiche le status du serveur
 sub status
 {
+	# Ouvrir le mkfifo en écriture et envoyer le status dedans
+	# TODO
+	open(WRITER, ">$fifo") or die "open : $!";
+	autoflush WRITER 1;
+	
 	$, = ",";
-	print "Numéro de processus père : $$\n" .
+	print WRITER "Numéro de processus père : $$\n" .
 			"Requêtes :\n" .
 			"\treçues : $req_received \n" .
 			"\ttraitées : $req_processed \n" .
-			"Nombre de clients connectés : " . ($#client + 1) . "\n";
-	print @client;
-	close CLIENT;
+			"Nombre de clients connectés : " . ($#client + 1) . "\n"
+			. @client . "\n";
+
+	close WRITER;
+}
+
+sub getStatus
+{
+	print "Votez FN\n";
+	open(READER, "<$filePid") or die "open : $!";
+	$pid = <READER>;
+	kill('USR1', $pid);
+	close(READER);
+	
+	open(READER, "<$fifo") or die "open : $!";
+	print <READER>;
+	close(READER);
+	
 }
 
 # Charge la configuration du serveur
-sub loadConfig()
+sub loadConfig
 {
 	$logger = "[Erreur de configuration]";
 	open CONFIG, "comanche.conf" or die "open: $!\n";
@@ -226,7 +253,7 @@ sub sendFolder
 {
 	$code = 200;
 	$response = $HTTP{$code};
-	$html = listFolder $_[0];
+	$html = listFolder(@_);
 	
 	print CLIENT "HTTP/1.1 $code $response\r\n" .
 			"Content-Type: text/html\r\n" .
@@ -238,28 +265,24 @@ sub sendFolder
 # Génère une page pour la navigation des dossiers si le dossier ne contient pas de fichier par défaut (type index.html)
 sub listFolder
 {
-	$dir = $_[0];
+	($dir, $req) = @_;
 	@folder = split("/", $dir);
 	$parent = join('/', ($folder[0]..$folder[-1]));
-	my $reponse = "<html><head><title>$SERVER_NAME - $dir</title></head>". "<body><h1>Index of : $dir</h1><hr/><ul>";
-
+	my $reponse = "<html><head><title>$SERVER_NAME - $dir</title></head>". "<body><h1>Index of : $req</h1><hr/><ul>";
 
 	opendir(REP,"$dir") or die "opendir: $!";
-	my @liste = readdir(REP);
+	my @liste = sort readdir(REP);
 	# On supprime le dossier courant
-	@liste = grep {$_ ne "."} @liste;
-	# On supprime le dossier parent
-	@liste = grep {$_ ne ".."} @liste; 
 	closedir REP;
 
 	#pour tout les elements dans la liste
 	foreach (@liste)
 	{
 		if (-d $i) {
-			$reponse .= " <li><a href=$_\/> $_</a></li>\n";
+			$reponse .= " <li><a href=$req/$_\/> $_</a></li>\n";
 		}
 		else {
-			$reponse .= " <li><a href=$_> $_</a></li>\n";
+			$reponse .= " <li><a href=$req/$_> $_</a></li>\n";
 		}
 	}
 
@@ -286,70 +309,113 @@ sub run
 	bind (SERVER, $caddr) or die ("bind: $!");
 	listen (SERVER, SOMAXCONN) or die ("listen: $!");
 
+	# On définit les status SIGCHLD ('waitChildren'), SIGUSR1 ('status'), SIGPIPE ('IGNORE')
+	# $SIG{'NOMDUSIGNAL'} = 'fonction'
+	# TODO
+	$SIG{'CHLD'} = 'waitChildren';
+	$SIG{'USR1'} = 'status';
+	$SIG{'PIPE'} = 'IGNORE';
+
 	for (;;)
 	{
-		accept (CLIENT, SERVER) or die ("accept: $!");
-		if (fork() == 0)
+		if (accept (CLIENT, SERVER))
 		{
-			($get, $req, $http) = split(" ", scalar <CLIENT>);
-			
-			$http =~ removeEOL($http);
-			while (<CLIENT>)
+			if (fork() == 0)
 			{
-				removeEOL;
-				
-				if (not $_)
+				($get, $req, $http) = split(" ", scalar <CLIENT>);
+			
+				$http =~ removeEOL($http);
+				while (<CLIENT>)
 				{
-					if ($get eq "GET" && $http eq "HTTP/1.1")
+					removeEOL;
+				
+					if (not $_)
 					{
-						($route, $file) = getRealPath($req);
-						if (-e $file)
+						if ($get eq "GET" && $http eq "HTTP/1.1")
 						{
-							if (-d $file)
+							($route, $file) = getRealPath($req);
+							if (-e $file)
 							{
-								sendFolder($file);
+								if (-d $file)
+								{
+									$index = $conf{"sets"}{"index"};
+									if (-e "$file/$index") 
+									{
+										sendFile("$file/$index");
+									}
+									else
+									{
+										sendFolder($file, $req);
+									}
+								}
+								else
+								{
+									sendFile($file);
+								}
 							}
-							else
-							{
-								sendFile($file);
+							else {
+								sendError(404);
 							}
 						}
-						else {
-							sendError(404);
+						else
+						{
+							sendError(400);
 						}
+						exit(0);
 					}
-					else
-					{
-						sendError(400);
-					}
-					exit(0);
 				}
 			}
+			else {
+				close CLIENT;
+			}
 		}
-		else {
-			close CLIENT;
-		}
-		do
-		{
-			$kid = waitpid(-1, WNOHANG);
-		} while ($kid > 0);
 	}
 	close SERVER;
 
 	print "Demarrer...", $port . "\n";
 }
 
+sub waitChildren {
+	do
+	{
+		$kid = waitpid(-1, WNOHANG);
+	} while ($kid > 0);
+}
+
 # Arrête le serveur
-sub stop { print "stop\n"; }
+sub stop 
+{
+	print "Arrêt de $SERVER_VERSION en cours ...\n";
+	open(READER, "<$filePid") or die "open : $!";
+	$pid = <READER>;
+	close(READER);
+	unlink($filePid);
+	kill('TERM', $pid);
+}
 
 if ($cmd eq "start")
 {
-	run();
+	if (-e $filePid) 
+	{
+		open(READER, "<$filePid") or die "open : $!";
+		close(READER);
+		print "$SERVER_VERSION est déjà en cours d'execution\n"; 
+	}
+	else
+	{
+		$servPid = $$;
+		autoflush WRITER 1;
+		open(WRITER, ">$filePid");
+		print WRITER $servPid;
+		close(WRITER);
+		print "Démarrage de $SERVER_VERSION (pid = $servPid)\n";
+		run();
+	}
 }
 elsif ($cmd eq "stop")
 {
 	stop();
 }
 else {
-	status();
+	getStatus();
 }
