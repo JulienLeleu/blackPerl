@@ -1,5 +1,5 @@
 #!/usr/bin/perl
 
-$val = "8080";
+$url = "http://webmaster.iu.edu/";
+print "Location: $url\n\n";
 
-print ($val - 8000), "\n";
