@@ -22,7 +22,6 @@ $PORT_MIN = 1;
 $PORT_MAX = 65535;
 
 # Map qui contient les codes HTTP avec leur erreur HTTP
-%HTTP;
 $HTTP{200} = "OK";
 $HTTP{400} = "Bad Request";
 $HTTP{403} = "Forbidden";
@@ -42,13 +41,22 @@ $HTTP{505} = "HTTP Version Not Supported";
 $req_received = 0;
 $req_processed = 0;
 
-#Definition de la fifo (pipe) pour la lecture/ecriture des status
+# On définit le chemin de la fifo (pipe) pour la lecture/ecriture des status
 $fifo = '/tmp/blackPerl.fifo';
-mkfifo($fifo, 0666);
 
-# On stocke le processus du serveur (le père) dans un fichier
+# On stocke le processus du serveur (le père) dans un fichier caché à la racine du serveur
 $serverFile = '.serv_pid';
 $serverPid;
+
+# On retrouve le pid du serveur dans le fichier $serverFile
+sub getServerPid
+{
+	local $pid;
+	open(READER, "<$serverFile") or die "Le serveur n'est pas allumé.\n";
+	$pid = <READER>;
+	close(READER) or die "close: $!";
+	return $pid;
+}
 
 # Affiche le status du serveur
 sub status
@@ -61,23 +69,20 @@ sub status
 	$, = " ";
 	print WRITER "Numéro de processus père : $$\n" .
 			"Requêtes :\n" .
-			"\treçues : $req_received \n" .
-			"\ttraitées : $req_processed \n" .
-			"Nombre de clients connectés : " . ($#client + 1) . "\n"
-			. "Clients: " . @client . "\n";
+			"\t- reçues : $req_received \n" .
+			"\t- traitées : $req_processed \n" .
+			"Clients: " . ($#client + 1) . "\n\t", @client, "\n";
 	$, = "";
-	close WRITER;
+	close(WRITER) or die "close : $!";
 }
 
+# Fonction exécutée par l'administrateur du serveur pour afficher le status du serveur
 sub readStatus
 {
-	# On retrouve le pid du serveur dans le fichier $serverFile
-	open(READER, "<$serverFile") or die "Le serveur n'est pas allumé.\n";
-	$spid = <READER>;
-	close(READER);
+	# On envoie un signal au serveur pour récupérer le status
+	kill('USR1', getServerPid());
 	
-	kill('USR1', $spid);
-	
+	# On lis les informations dans la fifo
 	open(READER, "<$fifo") or die "open : $!";
 	print <READER>;
 	close(READER);
@@ -126,6 +131,8 @@ sub loadConfig
 			($key, $val) = ($1, $2);
 			$conf{"exec"}{$key} = $val;
 			# On envoit la clé dans une map générale de clé "rules"
+			# Ce système permet de conserver l'ordre d'exécution des règles
+			# telles qu'elles ont été écrites dans le fichier
 			push(@{$conf{"rules"}}, $key);
 		}
 	}
@@ -137,7 +144,7 @@ sub getDate
 {
 	my ($s, $mn, $h, $j, $m, $a) = localtime(time);
 
-	#Formatage de la date (ajoute des 0 si inferieur a 10)
+	# Formatage de la date (ajoute des 0 si inferieur a 10)
 	$j	= sprintf("%.2d", $j);
 	$m	= sprintf("%.2d", $m + 1);
 	$s  = sprintf("%.2d", $s);
@@ -145,7 +152,7 @@ sub getDate
 	$h  = sprintf("%.2d", $h);
 	$a	= $a + 1900;
 	
-	return "$j/$m/$a - $h:$mn:$s";
+	return "$j/$m/$a:$h:$mn:$s";
 }
 
 # Permet d'ajouter les événements au fichier de log définit dans la configuration
@@ -216,6 +223,30 @@ sub getRealPath
 	return ($route[0], $r);
 }
 
+# Envoie l'en-tête de réponse au client
+sub sendHeader
+{
+	($code, $response, $mime, $length) = @_;
+	print CLIENT "HTTP/1.1 $code $response\r\n" .
+				"Content-Type: " . $mime . "\r\n" .
+				"Content-Length: " . $length . "\r\n\r\n";
+}
+
+# Envoie un fichier au client
+sub printFile
+{
+	$buffer = "";
+	$length = 1024;
+	$file = $_[0];
+	
+	open FILE, $file;
+	while (read(FILE, $buffer, $length))
+	{
+		print CLIENT $buffer;
+	}
+	close FILE;
+}
+
 # Envoie un fichier au client (code HTTP 200)
 sub sendFile
 {
@@ -225,39 +256,42 @@ sub sendFile
 	$response = $HTTP{$code};
 	($route, $file, $req) = @_;
 	
+	sendHeader($code, $response, mimetype($file), (-s $file));
+	
 	# Si route vaut "route", on ouvre le fichier
 	if ($route eq "route")
 	{
 		info("get-s", getIPClient(), $req, $file, $code);
-		open FILE, $file;
+		printFile($file);
 	}
-	# S'il vaut "exec", on exécute le fichier
+	# S'il vaut "exec", on exécute le fichier et on lis sa sortie
 	elsif ($route eq "exec")
 	{
 		info("get-d", getIPClient(), $req, $file, $code);
-		open FILE, "-|", 'perl ' . $file;
-	}
-	
-	print CLIENT "HTTP/1.1 $code $response\r\n" .
-				"Content-Type: " . mimetype($file) . "\r\n" .
-				"Content-Length: " . (-s $file) . "\r\n\r\n";
-	while (read(FILE, $buffer, $length))
-	{
-		print CLIENT $buffer;
+		printFile("-| perl $file");
 	}
 }
 
 # Envoie une erreur HTTP au client via le code HTTP en paramètre
 sub sendError
 {
+	$page404 = $conf{"sets"}{'default'};
 	$code = $_[0];
 	$error = $HTTP{$code};
-	$html = "<html>\r\n<head>\r\n<title>$error</title>\r\n</head>\r\n<body>\r\n<h1>$error</h1>\r\n<hr>\r\n<p>$SERVER_VERSION</p>\r\n</body>\r\n</html>\r\n\r\n";
 	
-	print CLIENT "HTTP/1.1 $code $error\r\n" .
-			"Content-Type: text/html\r\n" .
-			"Content-Length: " . length($html) . "\r\n\r\n"
-			. $html;
+	sendHeader($code, $error, 'text/html', length($html));
+	
+	# Si le code d'erreur est 404 et qu'on a une page déjà établie, on l'affiche
+	# Dans le cas contraire, on crée une page d'erreur dynamiquement
+	if ($code == 404 and -e $page404)
+	{
+		printFile($page404);
+	}
+	else
+	{
+		$html = "<html>\r\n<head>\r\n<title>$error</title>\r\n</head>\r\n<body>\r\n<h1>$error</h1>\r\n<hr>\r\n<p>$SERVER_VERSION</p>\r\n</body>\r\n</html>\r\n\r\n";
+		print CLIENT $html;
+	}
 }
 
 # Envoie un dossier
@@ -267,10 +301,9 @@ sub sendFolder
 	$response = $HTTP{$code};
 	$html = listFolder(@_);
 	
-	print CLIENT "HTTP/1.1 $code $response\r\n" .
-			"Content-Type: text/html\r\n" .
-			"Content-Length: " . length($html) . "\r\n\r\n"
-			. $html;
+	sendHeader($code, $response, 'text/html', length($html));
+	
+	print CLIENT $html;
 }
 
 # Génère une page pour la navigation des dossiers si le dossier ne contient pas de fichier par défaut (type index.html)
@@ -318,6 +351,8 @@ sub removeEOL
 sub run
 {
 	print "Démarrage de $SERVER_VERSION (pid = $serverPid)\n";
+	
+	# On charge la configuration
 	loadConfig();
 	$port = $conf{"sets"}{"port"};
 	$caddr = sockaddr_in ($port, INADDR_ANY);
@@ -327,6 +362,9 @@ sub run
 	setsockopt (SERVER, SOL_SOCKET, SO_REUSEADDR, 1) or die ("setsockopt: $!");
 	bind (SERVER, $caddr) or die ("bind: $!");
 	listen (SERVER, SOMAXCONN) or die ("listen: $!");
+
+	# On crée la fifo
+	mkfifo($fifo, 0666);
 
 	# On définit certains signaux
 	$SIG{'CHLD'} = 'waitChildren';	# Lorsqu'un fils meurt
@@ -342,9 +380,12 @@ sub run
 			# On indique que l'on a reçu une requête
 			$req_received++;
 			
-			if ($#clients >= $config{"sets"}{"clients"})
+			# Le serveur ne peut pas accueillir un client supplémentaire
+			# On avertit le client qui tente de se connecter
+			if ($#client >= $conf{"sets"}{"clients"})
 			{
 				sendError(503);
+				close CLIENT;
 			}
 			else
 			{
@@ -413,12 +454,12 @@ sub stop
 {
 	print "Arrêt de $SERVER_VERSION en cours ...\n";
 	info("stop", "local", $port , "", "");
-	# On supprime le numéro de processus du père contenu dans un fichier
-	unlink($serverFile);
 	# On attend la fermeture de tous les fils
 	waitChildren();
 	# On clos la socket SERVER
 	close SERVER;
+	# On supprime le numéro de processus du père contenu dans un fichier
+	unlink($serverFile);
 	# On termine le programme
 	kill('TERM', $serverPid);
 }
@@ -426,10 +467,7 @@ sub stop
 # Arrête le serveur depuis une action extérieure (./comanche stop)
 sub stopServer
 {
-	open(READER, "<$serverFile") or die "Le serveur n'est pas allumé.\n";
-	$serverPid = <READER>;
-	close(READER);
-	kill('INT', $serverPid);
+	kill('INT', getServerPid());
 }
 
 if ($cmd eq "start")
