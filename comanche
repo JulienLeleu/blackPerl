@@ -76,19 +76,6 @@ sub status
 	close(WRITER) or die "close : $!";
 }
 
-# Fonction exécutée par l'administrateur du serveur pour afficher le status du serveur
-sub readStatus
-{
-	# On envoie un signal au serveur pour récupérer le status
-	kill('USR1', getServerPid());
-	
-	# On lis les informations dans la fifo
-	open(READER, "<$fifo") or die "open : $!";
-	print <READER>;
-	close(READER);
-	
-}
-
 # Charge la configuration du serveur
 sub loadConfig
 {
@@ -187,6 +174,8 @@ sub getRoute
 	}
 	# Si on ne trouve aucun résultat, on renvoie une erreur 404
 	sendError(404);
+	close CLIENT;
+	exit 0;
 }
 
 # Récupère le chemin réel d'un fichier demandé par la requête HTTP 
@@ -385,7 +374,6 @@ sub run
 			if ($#client >= $conf{"sets"}{"clients"})
 			{
 				sendError(503);
-				close CLIENT;
 			}
 			else
 			{
@@ -432,10 +420,10 @@ sub run
 					push(@client, $pid);
 					# On indique que la requête a été traitée
 					$req_processed++;
-					# Le père n'a pas besoin du CLIENT, on le ferme
-					close CLIENT;
 				}
 			}
+			# Le père n'a pas besoin du CLIENT, on le ferme
+			close CLIENT;
 		}
 	}
 }
@@ -452,7 +440,7 @@ sub waitChildren {
 # Arrêt du serveur lui-même (fonction appelée soit par ./comanche stop soit par ^C)
 sub stop 
 {
-	print "Arrêt de $SERVER_VERSION en cours ...\n";
+	print "[$$] Arrêt de $SERVER_VERSION en cours ...\n";
 	info("stop", "local", $port , "", "");
 	# On attend la fermeture de tous les fils
 	waitChildren();
@@ -462,12 +450,6 @@ sub stop
 	unlink($serverFile);
 	# On termine le programme
 	kill('TERM', $serverPid);
-}
-
-# Arrête le serveur depuis une action extérieure (./comanche stop)
-sub stopServer
-{
-	kill('INT', getServerPid());
 }
 
 if ($cmd eq "start")
@@ -488,8 +470,16 @@ if ($cmd eq "start")
 }
 elsif ($cmd eq "stop")
 {
-	stopServer();
+	# On demande au serveur de s'arrêter (il passe dans la fonction stop)
+	kill('INT', getServerPid());
 }
 else {
-	readStatus();
+	# On envoie un signal au serveur pour récupérer le status qui sera stocké dans la fifo
+	kill('USR1', getServerPid());
+	# On lis les informations dans la fifo
+	open(READER, "<$fifo") or die "open : $!";
+	# On affiche la seule ligne stockée dans la fifo
+	print <READER>;
+	# On ferme la lecture de la fifo
+	close(READER) or die "close : $!";
 }
