@@ -8,8 +8,11 @@ use POSIX ":sys_wait_h";
 # On conserve la commande (start, stop, status)
 $cmd = $ARGV[0];
 
+# Liste des arguments valides
+@args = ('start', 'stop', 'status');
+
 # On sort si la commande n'est pas correcte
-die "Usage: $0 <start|stop|status>\n" if (!($cmd eq "start" or $cmd eq "stop" or $cmd eq "status"));
+die "Usage: $0 <start|stop|status>\n" unless(grep { $cmd eq $_ } @args);
 
 # Nom du serveur
 $SERVER_NAME = "blackPerl";
@@ -49,38 +52,19 @@ $serverFile = '.serv_pid';
 $serverPid;
 
 # On retrouve le pid du serveur dans le fichier $serverFile
-sub getServerPid
+sub get_server_pid
 {
-	local $pid;
 	open(READER, "<$serverFile") or die "Le serveur n'est pas allumé.\n";
-	$pid = <READER>;
+	$serverPid = <READER>;
 	close(READER) or die "close: $!";
-	return $pid;
-}
-
-# Affiche le status du serveur
-sub status
-{
-	# Ouvrir le mkfifo en écriture et envoyer le status dedans
-	# TODO
-	open(WRITER, ">$fifo") or die "open : $!";
-	autoflush WRITER 1;
-	
-	$, = " ";
-	print WRITER "Numéro de processus père : $$\n" .
-			"Requêtes :\n" .
-			"\t- reçues : $req_received \n" .
-			"\t- traitées : $req_processed \n" .
-			"Clients: " . ($#client + 1) . "\n\t", @client, "\n";
-	$, = "";
-	close(WRITER) or die "close : $!";
+	return $serverPid;
 }
 
 # Charge la configuration du serveur
-sub loadConfig
+sub load_config
 {
-	$error = "[Erreur de configuration]";
 	open CONFIG, "comanche.conf" or die "open: $!\n";
+	$error = "[Erreur de configuration]";
 	while(<CONFIG>)
 	{
 		# La ligne est du type "set <key> <value>"
@@ -126,35 +110,9 @@ sub loadConfig
 	close(CONFIG) or die "close: $!\n";
 }
 
-# Récupère la date locale formatée du serveur
-sub getDate
-{
-	my ($s, $mn, $h, $j, $m, $a) = localtime(time);
-
-	# Formatage de la date (ajoute des 0 si inferieur a 10)
-	$j	= sprintf("%.2d", $j);
-	$m	= sprintf("%.2d", $m + 1);
-	$s  = sprintf("%.2d", $s);
-	$mn = sprintf("%.2d", $mn);
-	$h  = sprintf("%.2d", $h);
-	$a	= $a + 1900;
-	
-	return "$j/$m/$a:$h:$mn:$s";
-}
-
-# Permet d'ajouter les événements au fichier de log définit dans la configuration
-sub info
-{
-	# On ouvre le fichier de log pour écrire dedans, s'il n'existe pas, il est créé
-	open LOG, ">>" . $conf{"sets"}{"logfile"};
-	$, = ";";
-	print LOG getDate(), @_, "\n";
-	$, = "";
-	close(LOG);
-}
-
 # Récupère la route configurée et associée à la requête HTTP
-sub getRoute
+# sous la forme d'une liste : (type_de_projection, clé_projection, valeur_projection)
+sub get_info_route
 {
 	$req = $_[0];
 	# Parcours de toutes les règles de réécriture (routes & exec) DANS L'ORDRE
@@ -172,18 +130,16 @@ sub getRoute
 			}
 		}
 	}
-	# Si on ne trouve aucun résultat, on renvoie une erreur 404
-	sendError(404);
-	close CLIENT;
-	exit 0;
+	# On retourne undef si aucune projection ne correspond
+	return undef;
 }
 
 # Récupère le chemin réel d'un fichier demandé par la requête HTTP 
-sub getRealPath
+sub get_real_path
 {
 	# Retourne un tableau avec les informations sur la position du fichier dans le système de fichiers
-	my @route = getRoute($_[0]);
-	# On affecte a param1 une expression qui peut etre utilisée a la place d'une expression perl
+	my @route = get_info_route($_[0]);	
+	# On affecte a motif une expression qui peut etre utilisée a la place d'une expression perl
 	my $motif = qr/$route[1]/;
 	# On redefinie la variable par defaut
 	$_ = $_[0];
@@ -212,17 +168,24 @@ sub getRealPath
 	return ($route[0], $r);
 }
 
+# Ferme le handle CLIENT et ferme le processus
+sub close_and_exit
+{
+	close CLIENT;
+	exit(0);
+}
+
 # Envoie l'en-tête de réponse au client
-sub sendHeader
+sub send_header
 {
 	($code, $response, $mime, $length) = @_;
-	print CLIENT "HTTP/1.1 $code $response\r\n" .
-				"Content-Type: " . $mime . "\r\n" .
-				"Content-Length: " . $length . "\r\n\r\n";
+	print CLIENT "HTTP/1.1 $code $response\r\n";
+	print CLIENT "Connection: close\r\n" unless ($code == 200);
+	print CLIENT "Content-Type: $mime\r\n", "Content-Length: $length\r\n", "\r\n";
 }
 
 # Envoie un fichier au client
-sub printFile
+sub print_file
 {
 	$buffer = "";
 	$length = 1024;
@@ -236,8 +199,22 @@ sub printFile
 	close FILE;
 }
 
+# Envoie un fichier au client via une projection de type 'route'
+sub exec_route
+{
+	info("get-s", get_ip_client(), @_);
+	print_file($file);
+}
+
+# Envoie le résultat d'un CGI au client
+sub exec_cgi
+{
+	info("get-d", get_ip_client(), @_);
+	print_file("-| perl $file");
+}
+
 # Envoie un fichier au client (code HTTP 200)
-sub sendFile
+sub send_file
 {
 	$buffer = "";
 	$length = 100;
@@ -245,58 +222,55 @@ sub sendFile
 	$response = $HTTP{$code};
 	($route, $file, $req) = @_;
 	
-	sendHeader($code, $response, mimetype($file), (-s $file));
+	# Si le fichier est un dossier, on crée une représentation HTML de celui-ci
+	if (-d $file)
+	{
+		$html = list_folder($file, $req);
+		send_header($code, $response, 'text/html', length($html));
+		print CLIENT $html;
+		close_and_exit();
+	}
+	
+	send_header($code, $response, mimetype($file), (-s $file));
 	
 	# Si route vaut "route", on ouvre le fichier
 	if ($route eq "route")
 	{
-		info("get-s", getIPClient(), $req, $file, $code);
-		printFile($file);
+		exec_route($req, $file, $code);
 	}
 	# S'il vaut "exec", on exécute le fichier et on lis sa sortie
 	elsif ($route eq "exec")
 	{
-		info("get-d", getIPClient(), $req, $file, $code);
-		printFile("-| perl $file");
+		exec_cgi($req, $file, $code);
 	}
+	close_and_exit();
 }
 
 # Envoie une erreur HTTP au client via le code HTTP en paramètre
-sub sendError
+sub send_error
 {
 	$page404 = $conf{"sets"}{'default'};
 	$code = $_[0];
 	$error = $HTTP{$code};
 	
-	sendHeader($code, $error, 'text/html', length($html));
-	
 	# Si le code d'erreur est 404 et qu'on a une page déjà établie, on l'affiche
 	# Dans le cas contraire, on crée une page d'erreur dynamiquement
 	if ($code == 404 and -e $page404)
 	{
-		printFile($page404);
+		send_header($code, $error, mimetype($page404), (-s $page404));
+		print_file($page404);
 	}
 	else
 	{
 		$html = "<html>\r\n<head>\r\n<title>$error</title>\r\n</head>\r\n<body>\r\n<h1>$error</h1>\r\n<hr>\r\n<p>$SERVER_VERSION</p>\r\n</body>\r\n</html>\r\n\r\n";
+		send_header($code, $error, 'text/html', length($html));
 		print CLIENT $html;
 	}
-}
-
-# Envoie un dossier
-sub sendFolder
-{
-	$code = 200;
-	$response = $HTTP{$code};
-	$html = listFolder(@_);
-	
-	sendHeader($code, $response, 'text/html', length($html));
-	
-	print CLIENT $html;
+	close_and_exit();
 }
 
 # Génère une page pour la navigation des dossiers si le dossier ne contient pas de fichier par défaut (type index.html)
-sub listFolder
+sub list_folder
 {
 	($dir, $req) = @_;
 	@folder = split("/", $dir);
@@ -305,7 +279,6 @@ sub listFolder
 
 	opendir(REP,"$dir") or die "opendir: $!";
 	my @liste = sort readdir(REP);
-	# On supprime le dossier courant
 	closedir REP;
 
 	#pour tout les elements dans la liste
@@ -323,26 +296,93 @@ sub listFolder
 	return $reponse;
 }
 
-sub getIPClient
+sub get_ip_client
 {
 	$peer = getpeername(CLIENT);
 	($port, $iaddr) = sockaddr_in($peer);
 	return inet_ntoa($iaddr);
 }
 
+# Récupère la date locale formatée du serveur
+sub get_date
+{
+	my ($s, $mn, $h, $j, $m, $a) = localtime(time);
+
+	# Formatage de la date (ajoute des 0 si inferieur a 10)
+	$j	= sprintf("%.2d", $j);
+	$m	= sprintf("%.2d", $m + 1);
+	$s  = sprintf("%.2d", $s);
+	$mn = sprintf("%.2d", $mn);
+	$h  = sprintf("%.2d", $h);
+	$a	= $a + 1900;
+	
+	return "$j/$m/$a:$h:$mn:$s";
+}
+
+
+# Permet d'ajouter les événements au fichier de log définit dans la configuration
+sub info
+{
+	# On ouvre le fichier de log pour écrire dedans, s'il n'existe pas, il est créé
+	open LOG, ">>" . $conf{"sets"}{"logfile"};
+	$, = ";";
+	print LOG get_date(), @_, "\n";
+	$, = "";
+	close(LOG);
+}
+
 # Formate une ligne de sorte que les \r et \n soient supprimés
-sub removeEOL
+sub remove_EOL
 {
 	return s/(\r|\n)+//g;
 }
 
-# Démarre le serveur
-sub run
+# Gère la connexion d'un client au serveur
+# Pour le fils : on retourne le handle CLIENT
+# Dans les autres cas : on retourne la vision du handle comme étant "undef" (donc false)
+sub accept_client
 {
-	print "Démarrage de $SERVER_VERSION (pid = $serverPid)\n";
+	if (!accept(CLIENT, SERVER))
+	{
+		return undef;
+	}
+	
+	# On indique que l'on a reçu une requête
+	$req_received++;
+	
+	# Création d'un client (processus fils)
+	$pid = fork();
+	if ($pid == -1)
+	{
+		close CLIENT;
+		return undef;
+	}
+	if ($pid > 0)
+	{
+		# Le processus père n'a pas besoin du client
+		close CLIENT;
+		# On insére le pid du fils créé dans la liste des clients
+		push(@client, $pid);
+		# On indique que la requête a été traitée
+		$req_processed++;
+		return undef;
+	}
+	print 'Connexion d\'un client. Numéro de processus: ', $$, "\n";
+	return CLIENT;
+}
+
+# Crée un serveur web
+sub create_server
+{
+	# On inscrit le pid du serveur dans un fichier
+	$serverPid = $$;
+	autoflush WRITER 1;
+	open(WRITER, ">$serverFile");
+	print WRITER $serverPid;
+	close(WRITER);
 	
 	# On charge la configuration
-	loadConfig();
+	load_config();
 	$port = $conf{"sets"}{"port"};
 	$caddr = sockaddr_in ($port, INADDR_ANY);
 	$proto = getprotobyname("tcp");
@@ -356,94 +396,72 @@ sub run
 	mkfifo($fifo, 0666);
 
 	# On définit certains signaux
-	$SIG{'CHLD'} = 'waitChildren';	# Lorsqu'un fils meurt
+	$SIG{'CHLD'} = 'wait_children';	# Lorsqu'un fils meurt
 	$SIG{'USR1'} = 'status';		# Lorsque l'utilisateur exécute ./comanche status
 	$SIG{'PIPE'} = 'IGNORE';		# Lorsqu'un PIPE est cassé
 	$SIG{'INT'} = 'stop';			# Lorsque l'on fait ^C
 
 	info("start", "local", $port , "", "");
+	print "$SERVER_VERSION (pid = $serverPid) démarré.\n";
+}
+
+# Parse la requête HTTP et retourne une liste sous la forme ($method, $req, $http)
+sub parse_http_request
+{
+	($method, $req, $http) = split(" ", scalar <CLIENT>);
+	$http =~ remove_EOL($http);
+	
+	return ($method, $req, $http);
+}
+
+# Démarre le serveur
+sub run
+{
+	create_server();
 	for (;;)
 	{
-		if (accept (CLIENT, SERVER))
+		if (accept_client())
 		{
-			# On indique que l'on a reçu une requête
-			$req_received++;
+			($method, $req, $http) = parse_http_request();
 			
-			# Le serveur ne peut pas accueillir un client supplémentaire
-			# On avertit le client qui tente de se connecter
-			if ($#client >= $conf{"sets"}{"clients"})
+			while (<CLIENT>)
 			{
-				sendError(503);
-			}
-			else
-			{
-				$pid = fork();
-				if ($pid == 0)
+				remove_EOL;
+				if (not $_)
 				{
-					($get, $req, $http) = split(" ", scalar <CLIENT>);
-			
-					$http =~ removeEOL($http);
-					while (<CLIENT>)
-					{
-						removeEOL;
-						if (not $_)
-						{
-							if ($get eq "GET" && $http eq "HTTP/1.1")
-							{
-								($route, $file) = getRealPath($req);
-								if (-e $file)
-								{
-									if (-d $file)
-									{
-										sendFolder($file, $req);
-									}
-									else
-									{
-										sendFile($route, $file, $req);
-									}
-								}
-								else {
-									sendError(404);
-								}
-							}
-							else
-							{
-								sendError(400);
-							}
-							close CLIENT;
-							exit(0);
-						}
-					}
-				}
-				else {
-					# On insére le pid du fils créé dans la liste des clients
-					push(@client, $pid);
-					# On indique que la requête a été traitée
-					$req_processed++;
+					# On renvoie l'erreur 503 si la requête ne peut être traitée par le serveur à cause d'un surplus de client
+					send_error(503) unless ($#client < $conf{"sets"}{"clients"});
+					# On renvoie l'erreur 400 si la requête est mal formulée
+					send_error(400) unless ($method eq 'GET' && $http eq 'HTTP/1.1');
+					# On récupère le chemin réel de la ressource demandée par le client
+					($route, $file) = get_real_path($req);
+					# On renvoie l'erreur 404 si la ressource n'existe pas à l'emplacement prévue
+					send_error(404) unless (-e $file);
+					# Si aucune erreur, on envoie le fichier au client
+					send_file($route, $file, $req);
 				}
 			}
-			# Le père n'a pas besoin du CLIENT, on le ferme
-			close CLIENT;
 		}
 	}
 }
 
-sub waitChildren {
-	do
+sub wait_children {
+	my $kid;
+	while (($kid = waitpid(-1, WNOHANG)) > 0)
 	{
-		$kid = waitpid(-1, WNOHANG);
+		print "Adieu $kid\n";
 		# On supprime le fils de la liste des clients
-		@client = grep { $_ != $pid } @client;
-	} while ($kid > 0);
+		@client = grep { $_ != $kid } @client;
+	}
 }
 
 # Arrêt du serveur lui-même (fonction appelée soit par ./comanche stop soit par ^C)
-sub stop 
+sub stop
 {
 	print "[$$] Arrêt de $SERVER_VERSION en cours ...\n";
 	info("stop", "local", $port , "", "");
 	# On attend la fermeture de tous les fils
-	waitChildren();
+	wait_children();
 	# On clos la socket SERVER
 	close SERVER;
 	# On supprime le numéro de processus du père contenu dans un fichier
@@ -452,34 +470,46 @@ sub stop
 	kill('TERM', $serverPid);
 }
 
-if ($cmd eq "start")
+# Affiche le status du serveur
+sub status
 {
-	if (-e $serverFile) 
-	{
-		print "$SERVER_VERSION est déjà en cours d'execution\n"; 
-	}
-	else
-	{
-		$serverPid = $$;
-		autoflush WRITER 1;
-		open(WRITER, ">$serverFile");
-		print WRITER $serverPid;
-		close(WRITER);
-		run();
-	}
+	# Ouvrir le mkfifo en écriture et envoyer le status dedans
+	open(WRITER, ">$fifo") or die "open : $!";
+	autoflush WRITER 1;
+	
+	$, = " ";
+	print WRITER "Numéro de processus père : $$\n",
+			"Requêtes :\n",
+			"\t- reçues : $req_received \n",
+			"\t- traitées : $req_processed \n",
+			"Clients: " . ($#client + 1) . "\n\t",
+			@client, "\n";
+	$, = "";
+	close(WRITER) or die "close : $!";
 }
-elsif ($cmd eq "stop")
+
+if ($cmd eq 'stop')
 {
 	# On demande au serveur de s'arrêter (il passe dans la fonction stop)
-	kill('INT', getServerPid());
+	kill('INT', get_server_pid());
 }
-else {
+elsif ($cmd eq 'status')
+{
 	# On envoie un signal au serveur pour récupérer le status qui sera stocké dans la fifo
-	kill('USR1', getServerPid());
+	kill('USR1', get_server_pid());
 	# On lis les informations dans la fifo
 	open(READER, "<$fifo") or die "open : $!";
 	# On affiche la seule ligne stockée dans la fifo
 	print <READER>;
 	# On ferme la lecture de la fifo
 	close(READER) or die "close : $!";
+}
+# Ici la commande vaut forcément 'start'
+elsif (-e $serverFile) 
+{
+	print "$SERVER_VERSION est déjà en cours d'execution\n"; 
+}
+else
+{
+	run();
 }
