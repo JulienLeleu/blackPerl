@@ -20,6 +20,10 @@ $SERVER_NAME = "blackPerl";
 # Version du serveur
 $SERVER_VERSION = "blackPerl v1.0";
 
+# On stocke le processus du serveur (le père) dans un fichier caché à la racine du serveur
+$SERVER_FILE = '.serv_pid';
+$server_pid;
+
 # Ports minimal et maximal
 $PORT_MIN = 1;
 $PORT_MAX = 65535;
@@ -34,6 +38,9 @@ $HTTP{415} = "Unsupported Media Type";
 $HTTP{503} = "Service Unavailable";
 $HTTP{505} = "HTTP Version Not Supported";
 
+# Les différents media type supportés
+@MEDIA_TYPE = ('text/plain', 'text/html', 'text/css', 'image/png');
+
 # Map qui contient la configuration du serveur
 %conf;
 
@@ -47,17 +54,13 @@ $req_processed = 0;
 # On définit le chemin de la fifo (pipe) pour la lecture/ecriture des status
 $fifo = '/tmp/blackPerl.fifo';
 
-# On stocke le processus du serveur (le père) dans un fichier caché à la racine du serveur
-$serverFile = '.serv_pid';
-$serverPid;
-
-# On retrouve le pid du serveur dans le fichier $serverFile
+# On retrouve le pid du serveur dans le fichier $SERVER_FILE
 sub get_server_pid
 {
-	open(READER, "<$serverFile") or die "Le serveur n'est pas allumé.\n";
-	$serverPid = <READER>;
+	open(READER, "<$SERVER_FILE") or die "Le serveur n'est pas allumé.\n";
+	$server_pid = <READER>;
 	close(READER) or die "close: $!";
-	return $serverPid;
+	return $server_pid;
 }
 
 # Charge la configuration du serveur
@@ -87,24 +90,24 @@ sub load_config
 			# A ne pas vérifier car vérification dynamique pendant l'utilisation du serveur
 			# elsif ($key eq "index") {}
 			# elsif ($key eq "logfile") {}
-			$conf{"sets"}{$key} = $val;
+			$conf{'sets'}{$key} = $val;
 		}
 		# La ligne est du type "route <regex> to <regex>"
 		elsif (/^route\s+(.+?)\s+to+\s+(.+)/)
 		{
 			($key, $val) = ($1, $2);
-			$conf{"routes"}{$key} = $val;
-			push(@{$conf{"rules"}}, $key);
+			$conf{'routes'}{$key} = $val;
+			push(@{$conf{'rules'}}, $key);
 		}
 		# La ligne est du type "exec <regex> to <regex>"
 		elsif (/^exec\s+(.+?)\s+from\s+(.+)/)
 		{
 			($key, $val) = ($1, $2);
-			$conf{"exec"}{$key} = $val;
+			$conf{'exec'}{$key} = $val;
 			# On envoit la clé dans une map générale de clé "rules"
 			# Ce système permet de conserver l'ordre d'exécution des règles
 			# telles qu'elles ont été écrites dans le fichier
-			push(@{$conf{"rules"}}, $key);
+			push(@{$conf{'rules'}}, $key);
 		}
 	}
 	close(CONFIG) or die "close: $!\n";
@@ -116,17 +119,17 @@ sub get_info_route
 {
 	$req = $_[0];
 	# Parcours de toutes les règles de réécriture (routes & exec) DANS L'ORDRE
-	for $route (@{$conf{"rules"}})
+	for $route (@{$conf{'rules'}})
 	{
 		if ($req =~ /$route/)
 		{
-			if (exists $conf{"routes"}{$route})
+			if (exists $conf{'routes'}{$route})
 			{
-				return ("route", $route, $conf{"routes"}{$route});
+				return ('route', $route, $conf{'routes'}{$route});
 			}
 			elsif (exists $conf{"exec"}{$route})
 			{
-				return ("exec", $route, $conf{"exec"}{$route});
+				return ('exec', $route, $conf{'exec'}{$route});
 			}
 		}
 	}
@@ -157,7 +160,7 @@ sub get_real_path
 	# Si la route à prendre est un dossier, on verifie l'existence d'un fichier par défaut à l'intérieur
 	if (-d $r)
 	{
-		$default_file = $r . $conf{"sets"}{"index"};
+		$default_file = $r . $conf{'sets'}{'index'};
 		if (-f $default_file)
 		{
 			$r = $default_file;
@@ -230,35 +233,46 @@ sub send_file
 		print CLIENT $html;
 		close_and_exit();
 	}
-	
-	send_header($code, $response, mimetype($file), (-s $file));
-	
-	# Si route vaut "route", on ouvre le fichier
-	if ($route eq "route")
+	else
 	{
-		exec_route($req, $file, $code);
+		$mime = mimetype($file);
+		# Si le type mime est supporté par le serveur, on continue
+		if (grep { $mime eq $_ } @MEDIA_TYPE)
+		{
+			send_header($code, $response, $mime, (-s $file));
+			# Si route vaut "route", on ouvre le fichier
+			if ($route eq "route")
+			{
+				exec_route($req, $file, $code);
+			}
+			# S'il vaut "exec", on exécute le fichier et on lis sa sortie
+			elsif ($route eq "exec")
+			{
+				exec_cgi($req, $file, $code);
+			}
+			close_and_exit();
+		}
+		# On renvoie une erreur dans le cas contraire
+		else
+		{
+			send_error(415);
+		}
 	}
-	# S'il vaut "exec", on exécute le fichier et on lis sa sortie
-	elsif ($route eq "exec")
-	{
-		exec_cgi($req, $file, $code);
-	}
-	close_and_exit();
 }
 
 # Envoie une erreur HTTP au client via le code HTTP en paramètre
 sub send_error
 {
-	$page404 = $conf{"sets"}{'default'};
-	$code = $_[0];
+	$default_page = $conf{'sets'}{'error'};
+	($code, $exit) = @_;
 	$error = $HTTP{$code};
 	
 	# Si le code d'erreur est 404 et qu'on a une page déjà établie, on l'affiche
 	# Dans le cas contraire, on crée une page d'erreur dynamiquement
-	if ($code == 404 and -e $page404)
+	if ($code == 404 and -e $default_page)
 	{
-		send_header($code, $error, mimetype($page404), (-s $page404));
-		print_file($page404);
+		send_header($code, $error, mimetype($default_page), (-s $default_page));
+		print_file($default_page);
 	}
 	else
 	{
@@ -266,7 +280,9 @@ sub send_error
 		send_header($code, $error, 'text/html', length($html));
 		print CLIENT $html;
 	}
-	close_and_exit();
+	# Si le serveur doit gérer lui même le cas d'erreur (ex: HTTP 503), on en ferme pas son processus
+	close_and_exit() if $exit;
+	return 1;
 }
 
 # Génère une page pour la navigation des dossiers si le dossier ne contient pas de fichier par défaut (type index.html)
@@ -324,7 +340,7 @@ sub get_date
 sub info
 {
 	# On ouvre le fichier de log pour écrire dedans, s'il n'existe pas, il est créé
-	open LOG, ">>" . $conf{"sets"}{"logfile"};
+	open LOG, ">>" . $conf{'sets'}{'logfile'};
 	$, = ";";
 	print LOG get_date(), @_, "\n";
 	$, = "";
@@ -359,12 +375,20 @@ sub accept_client
 	}
 	if ($pid > 0)
 	{
-		# Le processus père n'a pas besoin du client
-		close CLIENT;
-		# On insére le pid du fils créé dans la liste des clients
-		push(@client, $pid);
-		# On indique que la requête a été traitée
-		$req_processed++;
+		if ($#client < $conf{'sets'}{'clients'})
+		{
+			# Le processus père n'a pas besoin du client
+			close CLIENT;
+			# On insére le pid du fils créé dans la liste des clients
+			push(@client, $pid);
+			# On indique que la requête a été traitée
+			$req_processed++;
+		}
+		# On renvoie l'erreur 503 si la requête ne peut être traitée par le serveur à cause d'un surplus de client
+		else
+		{
+			send_error(503);
+		}
 		return undef;
 	}
 	print 'Connexion d\'un client. Numéro de processus: ', $$, "\n";
@@ -373,17 +397,18 @@ sub accept_client
 
 # Crée un serveur web
 sub create_server
-{
-	# On inscrit le pid du serveur dans un fichier
-	$serverPid = $$;
-	autoflush WRITER 1;
-	open(WRITER, ">$serverFile");
-	print WRITER $serverPid;
-	close(WRITER);
-	
+{	
 	# On charge la configuration
 	load_config();
-	$port = $conf{"sets"}{"port"};
+	
+	# On inscrit le pid du serveur dans un fichier
+	$server_pid = $$;
+	autoflush WRITER 1;
+	open(WRITER, ">$SERVER_FILE");
+	print WRITER $server_pid;
+	close(WRITER);
+	
+	$port = $conf{'sets'}{'port'};
 	$caddr = sockaddr_in ($port, INADDR_ANY);
 	$proto = getprotobyname("tcp");
 	
@@ -402,7 +427,7 @@ sub create_server
 	$SIG{'INT'} = 'stop';			# Lorsque l'on fait ^C
 
 	info("start", "local", $port , "", "");
-	print "$SERVER_VERSION (pid = $serverPid) démarré.\n";
+	print "$SERVER_VERSION (pid = $server_pid) démarré.\n";
 }
 
 # Parse la requête HTTP et retourne une liste sous la forme ($method, $req, $http)
@@ -429,8 +454,6 @@ sub run
 				remove_EOL;
 				if (not $_)
 				{
-					# On renvoie l'erreur 503 si la requête ne peut être traitée par le serveur à cause d'un surplus de client
-					send_error(503) unless ($#client < $conf{"sets"}{"clients"});
 					# On renvoie l'erreur 400 si la requête est mal formulée
 					send_error(400) unless ($method eq 'GET' && $http eq 'HTTP/1.1');
 					# On récupère le chemin réel de la ressource demandée par le client
@@ -465,9 +488,9 @@ sub stop
 	# On clos la socket SERVER
 	close SERVER;
 	# On supprime le numéro de processus du père contenu dans un fichier
-	unlink($serverFile);
+	unlink($SERVER_FILE);
 	# On termine le programme
-	kill('TERM', $serverPid);
+	kill('TERM', $server_pid);
 }
 
 # Affiche le status du serveur
@@ -505,7 +528,7 @@ elsif ($cmd eq 'status')
 	close(READER) or die "close : $!";
 }
 # Ici la commande vaut forcément 'start'
-elsif (-e $serverFile) 
+elsif (-e $SERVER_FILE) 
 {
 	print "$SERVER_VERSION est déjà en cours d'execution\n"; 
 }
