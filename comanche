@@ -12,31 +12,34 @@ $cmd = $ARGV[0];
 @args = ('start', 'stop', 'status');
 
 # On sort si la commande n'est pas correcte
-die "Usage: $0 <start|stop|status>\n" unless(grep { $cmd eq $_ } @args);
+die 'Usage: $0 <start|stop|status>\n' unless(grep { $cmd eq $_ } @args);
 
 # Nom du serveur
-$SERVER_NAME = "blackPerl";
+$SERVER_NAME = 'blackPerl';
 
 # Version du serveur
-$SERVER_VERSION = "blackPerl v1.0";
+$SERVER_VERSION = 'blackPerl v1.0';
 
 # On stocke le processus du serveur (le père) dans un fichier caché à la racine du serveur
 $SERVER_FILE = '.serv_pid';
 $server_pid;
+
+# On stocke le processus du superviseur
+$supervisor_pid;
 
 # Ports minimal et maximal
 $PORT_MIN = 1;
 $PORT_MAX = 65535;
 
 # Map qui contient les codes HTTP avec leur erreur HTTP
-$HTTP{200} = "OK";
-$HTTP{400} = "Bad Request";
-$HTTP{403} = "Forbidden";
-$HTTP{404} = "Not Found";
-$HTTP{405} = "Method Not Allowed";
-$HTTP{415} = "Unsupported Media Type";
-$HTTP{503} = "Service Unavailable";
-$HTTP{505} = "HTTP Version Not Supported";
+$HTTP{200} = 'OK';
+$HTTP{400} = 'Bad Request';
+$HTTP{403} = 'Forbidden';
+$HTTP{404} = 'Not Found';
+$HTTP{405} = 'Method Not Allowed';
+$HTTP{415} = 'Unsupported Media Type';
+$HTTP{503} = 'Service Unavailable';
+$HTTP{505} = 'HTTP Version Not Supported';
 
 # Les différents media type supportés
 @MEDIA_TYPE = ('text/plain', 'text/html', 'text/css', 'image/png');
@@ -52,7 +55,10 @@ $req_received = 0;
 $req_processed = 0;
 
 # On définit le chemin de la fifo (pipe) pour la lecture/ecriture des status
-$fifo = '/tmp/blackPerl.fifo';
+$fifo_status = '/tmp/blackPerl.fifo';
+
+# On définit le chemin de la fifo pour la lecture/ecriture des logs par le superviseur
+$fifo_supervisor = '/tmp/blackPerl_log.fifo';
 
 # On retrouve le pid du serveur dans le fichier $SERVER_FILE
 sub get_server_pid
@@ -92,18 +98,20 @@ sub load_config
 			# elsif ($key eq "logfile") {}
 			$conf{'sets'}{$key} = $val;
 		}
-		# La ligne est du type "route <regex> to <regex>"
-		elsif (/^route\s+(.+?)\s+to+\s+(.+)/)
+		else
 		{
-			($key, $val) = ($1, $2);
-			$conf{'routes'}{$key} = $val;
-			push(@{$conf{'rules'}}, $key);
-		}
-		# La ligne est du type "exec <regex> to <regex>"
-		elsif (/^exec\s+(.+?)\s+from\s+(.+)/)
-		{
-			($key, $val) = ($1, $2);
-			$conf{'exec'}{$key} = $val;
+			# La ligne est du type "route <regex> to <regex>"
+			if (/^route\s+(.+?)\s+to+\s+(.+)/)
+			{
+				($key, $val) = ($1, $2);
+				$conf{'routes'}{$key} = $val;
+			}
+			# La ligne est du type "exec <regex> to <regex>"
+			elsif (/^exec\s+(.+?)\s+from\s+(.+)/)
+			{
+				($key, $val) = ($1, $2);
+				$conf{'exec'}{$key} = $val;
+			}
 			# On envoit la clé dans une map générale de clé "rules"
 			# Ce système permet de conserver l'ordre d'exécution des règles
 			# telles qu'elles ont été écrites dans le fichier
@@ -127,7 +135,7 @@ sub get_info_route
 			{
 				return ('route', $route, $conf{'routes'}{$route});
 			}
-			elsif (exists $conf{"exec"}{$route})
+			elsif (exists $conf{'exec'}{$route})
 			{
 				return ('exec', $route, $conf{'exec'}{$route});
 			}
@@ -174,6 +182,7 @@ sub get_real_path
 # Ferme le handle CLIENT et ferme le processus
 sub close_and_exit
 {
+	close SUPERVISOR;
 	close CLIENT;
 	exit(0);
 }
@@ -205,22 +214,26 @@ sub print_file
 # Envoie un fichier au client via une projection de type 'route'
 sub exec_route
 {
-	info("get-s", get_ip_client(), @_);
+	($req, $file, $code, $response) = @_;
+	send_header($code, $response, $mime, (-s $file));
+	info("get-s", get_ip_client(), $req, $file, $code);
 	print_file($file);
 }
 
 # Envoie le résultat d'un CGI au client
 sub exec_cgi
 {
-	info("get-d", get_ip_client(), @_);
-	print_file("-| perl $file");
+	($req, $file, $code, $response) = @_;
+	info("get-d", get_ip_client(), $req, $file, $code);
+	$html = `perl $_[1]`;
+	
+	send_header($code, $response, 'text/html', length($html));
+	print CLIENT $html;
 }
 
 # Envoie un fichier au client (code HTTP 200)
 sub send_file
 {
-	$buffer = "";
-	$length = 100;
 	$code = 200;
 	$response = $HTTP{$code};
 	($route, $file, $req) = @_;
@@ -231,7 +244,6 @@ sub send_file
 		$html = list_folder($file, $req);
 		send_header($code, $response, 'text/html', length($html));
 		print CLIENT $html;
-		close_and_exit();
 	}
 	else
 	{
@@ -239,18 +251,16 @@ sub send_file
 		# Si le type mime est supporté par le serveur, on continue
 		if (grep { $mime eq $_ } @MEDIA_TYPE)
 		{
-			send_header($code, $response, $mime, (-s $file));
 			# Si route vaut "route", on ouvre le fichier
-			if ($route eq "route")
+			if ($route eq 'route')
 			{
-				exec_route($req, $file, $code);
+				exec_route($req, $file, $code, $response);
 			}
 			# S'il vaut "exec", on exécute le fichier et on lis sa sortie
-			elsif ($route eq "exec")
+			elsif ($route eq 'exec')
 			{
-				exec_cgi($req, $file, $code);
+				exec_cgi($req, $file, $code, $response);
 			}
-			close_and_exit();
 		}
 		# On renvoie une erreur dans le cas contraire
 		else
@@ -258,14 +268,20 @@ sub send_file
 			send_error(415);
 		}
 	}
+	close_and_exit();
 }
 
 # Envoie une erreur HTTP au client via le code HTTP en paramètre
 sub send_error
 {
 	$default_page = $conf{'sets'}{'error'};
-	($code, $exit) = @_;
+	($code, $continue, $req, $file) = @_;
 	$error = $HTTP{$code};
+	
+	if ($req and $file)
+	{
+		info("get-s", get_ip_client(), $req, $file, $code);
+	}
 	
 	# Si le code d'erreur est 404 et qu'on a une page déjà établie, on l'affiche
 	# Dans le cas contraire, on crée une page d'erreur dynamiquement
@@ -281,7 +297,7 @@ sub send_error
 		print CLIENT $html;
 	}
 	# Si le serveur doit gérer lui même le cas d'erreur (ex: HTTP 503), on en ferme pas son processus
-	close_and_exit() if $exit;
+	close_and_exit() unless $continue;
 	return 1;
 }
 
@@ -312,6 +328,36 @@ sub list_folder
 	return $reponse;
 }
 
+# Pour le superviseur qui lis dans la fifo et qui écrit dans le fichier de log
+sub supervise
+{
+	print "[$$] Je supervise les logs !\n";
+	# On ouvre le fichier de log pour écrire dedans, s'il n'existe pas, il est créé
+	open LOG, ">>" . $conf{'sets'}{'logfile'} and autoflush LOG 1;
+	# On lis les informations dans la fifo
+	open(WORKERS, "<$fifo_supervisor");
+	# Le superviseur écrit ce qu'il reçoit dans le fichier de log
+	$, = ";";
+	while (<WORKERS>)
+	{
+		print LOG get_date(), $_;
+	}
+	$, = "";
+	print "[$$] J'arrête de superviser\n";
+	# On ferme la lecture de la fifo
+	close(WORKERS);
+	# On ferme le fichier de log
+	close(LOG);
+	# On ferme le superviseur
+	exit(0);
+}
+
+# On lis le serveur ou le fils courant au superviseur
+sub link_supervisor
+{
+	open(SUPERVISOR, ">$fifo_supervisor") and autoflush SUPERVISOR 1;
+}
+
 sub get_ip_client
 {
 	$peer = getpeername(CLIENT);
@@ -335,16 +381,13 @@ sub get_date
 	return "$j/$m/$a:$h:$mn:$s";
 }
 
-
 # Permet d'ajouter les événements au fichier de log définit dans la configuration
+# en envoyant l'information au superviseur du journal
 sub info
 {
-	# On ouvre le fichier de log pour écrire dedans, s'il n'existe pas, il est créé
-	open LOG, ">>" . $conf{'sets'}{'logfile'};
 	$, = ";";
-	print LOG get_date(), @_, "\n";
+	print SUPERVISOR @_, "\n";
 	$, = "";
-	close(LOG);
 }
 
 # Formate une ligne de sorte que les \r et \n soient supprimés
@@ -358,41 +401,42 @@ sub remove_EOL
 # Dans les autres cas : on retourne la vision du handle comme étant "undef" (donc false)
 sub accept_client
 {
-	if (!accept(CLIENT, SERVER))
-	{
-		return undef;
-	}
+	if (accept(CLIENT, SERVER))
+	{	
+		# On indique que l'on a reçu une requête
+		$req_received++;
 	
-	# On indique que l'on a reçu une requête
-	$req_received++;
-	
-	# Création d'un client (processus fils)
-	$pid = fork();
-	if ($pid == -1)
-	{
-		close CLIENT;
-		return undef;
-	}
-	if ($pid > 0)
-	{
-		if ($#client < $conf{'sets'}{'clients'})
+		# Création d'un client (processus fils)
+		$pid = fork();
+		if ($pid == -1)
 		{
-			# Le processus père n'a pas besoin du client
 			close CLIENT;
-			# On insére le pid du fils créé dans la liste des clients
-			push(@client, $pid);
-			# On indique que la requête a été traitée
-			$req_processed++;
 		}
-		# On renvoie l'erreur 503 si la requête ne peut être traitée par le serveur à cause d'un surplus de client
-		else
+		# On est dans le père
+		elsif ($pid > 0)
 		{
-			send_error(503);
+			if ($#client < $conf{'sets'}{'clients'})
+			{
+				# Le processus père n'a pas besoin du client
+				close CLIENT;
+				# On insére le pid du fils créé dans la liste des clients
+				push(@client, $pid);
+				# On indique que la requête a été traitée
+				$req_processed++;
+			}
+			# On renvoie l'erreur 503 si la requête ne peut être traitée par le serveur à cause d'un surplus de client
+			else
+			{
+				send_error(503, 1);
+			}
 		}
-		return undef;
+		elsif ($pid == 0)
+		{
+			print 'Connexion d\'un client. Numéro de processus: ', $$, "\n";
+			return CLIENT;
+		}
 	}
-	print 'Connexion d\'un client. Numéro de processus: ', $$, "\n";
-	return CLIENT;
+	return undef;
 }
 
 # Crée un serveur web
@@ -403,8 +447,7 @@ sub create_server
 	
 	# On inscrit le pid du serveur dans un fichier
 	$server_pid = $$;
-	autoflush WRITER 1;
-	open(WRITER, ">$SERVER_FILE");
+	open(WRITER, ">$SERVER_FILE") and autoflush WRITER 1;
 	print WRITER $server_pid;
 	close(WRITER);
 	
@@ -417,23 +460,41 @@ sub create_server
 	bind (SERVER, $caddr) or die ("bind: $!");
 	listen (SERVER, SOMAXCONN) or die ("listen: $!");
 
-	# On crée la fifo
-	mkfifo($fifo, 0666);
+	# On crée la fifo pour le status
+	mkfifo($fifo_status, 0666);
+	
+	# On crée le superviseur et sa fifo
+	mkfifo($fifo_supervisor, 0666);
+	
+	$pid = fork();
 
-	# On définit certains signaux
-	$SIG{'CHLD'} = 'wait_children';	# Lorsqu'un fils meurt
-	$SIG{'USR1'} = 'status';		# Lorsque l'utilisateur exécute ./comanche status
-	$SIG{'PIPE'} = 'IGNORE';		# Lorsqu'un PIPE est cassé
-	$SIG{'INT'} = 'stop';			# Lorsque l'on fait ^C
+	# On est dans le superviseur	
+	if ($pid == 0)
+	{
+		$supervisor_pid = $$;
+		supervise();
+	}
+	# On est dans le répartiteur (serveur)
+	elsif ($pid > 0)
+	{
+		# On définit certains signaux
+		$SIG{'CHLD'} = 'wait_children';	# Lorsqu'un fils meurt
+		$SIG{'USR1'} = 'status';		# Lorsque l'utilisateur exécute ./comanche status
+		$SIG{'PIPE'} = 'IGNORE';		# Lorsqu'un PIPE est cassé
+		$SIG{'INT'} = 'stop';			# Lorsque l'on fait ^C ou ./comanche stop
+		
+		link_supervisor();
 
-	info("start", "local", $port , "", "");
-	print "$SERVER_VERSION (pid = $server_pid) démarré.\n";
+		# On envoie au superviseur l'information comme quoi le serveur a démarré
+		info('start', 'local', $port , '', '');
+		print "$SERVER_VERSION (pid = $server_pid) démarré.\n";
+	}
 }
 
 # Parse la requête HTTP et retourne une liste sous la forme ($method, $req, $http)
 sub parse_http_request
 {
-	($method, $req, $http) = split(" ", scalar <CLIENT>);
+	($method, $req, $http) = split(' ', scalar <CLIENT>);
 	$http =~ remove_EOL($http);
 	
 	return ($method, $req, $http);
@@ -459,7 +520,7 @@ sub run
 					# On récupère le chemin réel de la ressource demandée par le client
 					($route, $file) = get_real_path($req);
 					# On renvoie l'erreur 404 si la ressource n'existe pas à l'emplacement prévue
-					send_error(404) unless (-e $file);
+					send_error(404, 0, $req, $file) unless (-e $file);
 					# Si aucune erreur, on envoie le fichier au client
 					send_file($route, $file, $req);
 				}
@@ -472,7 +533,6 @@ sub wait_children {
 	my $kid;
 	while (($kid = waitpid(-1, WNOHANG)) > 0)
 	{
-		print "Adieu $kid\n";
 		# On supprime le fils de la liste des clients
 		@client = grep { $_ != $kid } @client;
 	}
@@ -482,7 +542,9 @@ sub wait_children {
 sub stop
 {
 	print "[$$] Arrêt de $SERVER_VERSION en cours ...\n";
-	info("stop", "local", $port , "", "");
+	info('stop', 'local', $port , '', '');
+	# On ferme le superviseur
+	close SUPERVISOR;
 	# On attend la fermeture de tous les fils
 	wait_children();
 	# On clos la socket SERVER
@@ -490,14 +552,14 @@ sub stop
 	# On supprime le numéro de processus du père contenu dans un fichier
 	unlink($SERVER_FILE);
 	# On termine le programme
-	kill('TERM', $server_pid);
+	exit(0);
 }
 
 # Affiche le status du serveur
 sub status
 {
 	# Ouvrir le mkfifo en écriture et envoyer le status dedans
-	open(WRITER, ">$fifo") or die "open : $!";
+	open(WRITER, ">$fifo_status") or die "open : $!";
 	autoflush WRITER 1;
 	
 	$, = " ";
@@ -521,7 +583,7 @@ elsif ($cmd eq 'status')
 	# On envoie un signal au serveur pour récupérer le status qui sera stocké dans la fifo
 	kill('USR1', get_server_pid());
 	# On lis les informations dans la fifo
-	open(READER, "<$fifo") or die "open : $!";
+	open(READER, "<$fifo_status") or die "open : $!";
 	# On affiche la seule ligne stockée dans la fifo
 	print <READER>;
 	# On ferme la lecture de la fifo
