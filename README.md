@@ -9,86 +9,99 @@ Binôme
 
 Tâches accomplies
 ------
-  - [X] gestion du port d'écoute
-  - [X] protocole HTTP/1.1
-  - [X] gestion de la page par défaut
-  - [X] gestion des fichiers index dans les répertoires
-  - [X] gestion des logs
-  - [X] gestion des clients en //
-  - [X] gestion du max de clients
-  - [X] routes statiques
-  - [X] routes avec expression régulières
-  - [X] cgi statiques
-  - [X] cgi avec expression régulières
-  - [ ] paramtres de cgi
+  - [X] Configuration
+  - [X] Traitement des requetes GET
+    - [X] Vers le système de fichiers
+    - [X] Vers les programmes CGI
+    - [ ] Paramètres des CGI
+  - [X] Journal des événements
+  - [X] Traitement des requêtes en parallèle
+  - [X] Gestion des erreurs
+    - [X] 200 OK
+    - [X] 400 Bad Request
+    - [X] 403 Forbidden
+    - [X] 404 Not Found
+    - [X] 405 Method Not Allowed
+    - [X] 415 Unsupported Media Type
+    - [X] 503 Service Unavailable
+    - [X] 505 HTTP Version Not Supported
 
-Détail
+
+Détail des fonctionnalités
 ------
-### Gestion du port d'coute
-Comanche est capable d'écouter sur le port configuré dans le fichier de configuration. Cependant si la configuration est rechargée avec la commande `perl comanche reload`, la mise  jour du port d'écoute ne s'effectue pas correctement.
+##Configuration
+Le serveur BlackPerl charge la configuration du fichier 'comanche.conf'. Il y a possibilité dans ce fichier d'y insérer des commentaires avec le marqueur '#' en debut de phrase. Ces paramètres sont stockés dans une hashmap sous la forme : 
+  - $conf{global}{...} pour les paramètres globaux tels que le port, le fichier par défaut, etc...
+  - $conf{routes}{...} pour les paramètres de type "route <regex> to <regex>"
+  - $conf{exec}{...} pour les paramètres de type "exec <regex> to <regex>"
+La procédure est lancée au démarrage du serveur.
 
-### protocole HTTP/1.1
-Comanche répond uniquement en respectant le protocole HTTP/1.1 défini dans la [RFC 2616](www.ietf.org/rfc/rfc2616.txt). Il est capable de répondre  trois erreurs standards : 
-- 404 : Page non trouvée.
-- 400 : Protocole non respecté.
-- 501 : Service non disponible.
+Les paramètres utilisables sont les suivants :
+  - port : le numéro du port TCP sur lequel BlackPerl ecoute.
+  - error : chemin de la page HTML par défaut.
+  - index : nom de base des fichiers dont le contenu est retourné quand la ressource demandée correspond à un repertoire et qu'un tel fichier existe dans ce répertoire.
+  - logfile : le chemin vers le journal
+  - clients : le nombre maximal de clients
 
-### Gestion de la page par défaut
-Comanche utilise la page par défaut comme page  renvoyée si il y a une erreur de type 404. En effet, le client doit être informé que la page demandée n'existe pas à travers un message d'erreur ainsi qu'un header contenant le code "404 Not found"
+##Traitement des requetes GET
+BlackPerl gère uniquement les requetes de type GET. Le systeme de route fait usage des expressions régulières.
 
-### Gestion des logs
-Comanche est capable de gérer un fichier de log configurable dans le fichier de configuration de comanche (comanche.conf). Ce fichier de log recense plusieurs actions : 
+### Système de fichiers
+BlackPerl est totalement capable de retourner le contenu d'un fichier de type html, png ou texte en spécifiant le Content-Type. Dans le cas contraire, une erreur de type 415 (Unsupported Media Type) est renvoyée. Il gère également les repertoires en renvoyant le fichier index quand il est présent. Dans le cas contraire, il renvoie une liste HTML avec son contenu.
+
+### CGI
+Les CGI sont utilisées afin de dynamiser les sites web hebergés par BlackPerl. Elles les dynamisent notamment grâce à l'utilisation de langages de programmation tels que python, bash, perl etc...
+[En savoir plus sur les CGI](http://www.ietf.org/rfc/rfc3875)
+
+### Paramètres des CGI
+Les paramètres permettent de dynamiser d'avantage le rendu des pages. Dans cette version ceux-ci ne sont pas pris en compte.
+
+##Gestion des erreurs
+BlackPerl respecte le protocole HTTP/1.1 défini dans la [RFC 2616](www.ietf.org/rfc/rfc2616.txt).
+Il est capable de gérer ces 8 erreurs standards, stockées dans une hashmap pour éviter toute redondance de code :
+ - `$HTTP{200} = 'OK';`
+ - `$HTTP{400} = 'Bad Request';`
+ - `$HTTP{403} = 'Forbidden';`
+ - `$HTTP{404} = 'Not Found';`
+ - `$HTTP{405} = 'Method Not Allowed';`
+ - `$HTTP{415} = 'Unsupported Media Type';`
+ - `$HTTP{503} = 'Service Unavailable';`
+ - `$HTTP{505} = 'HTTP Version Not Supported';`
+
+## Journal des événements
+BlackPerl gére un fichier de log configurable dans le fichier `comanche.conf`.
+Ce fichier (comanche.log) recense plusieurs actions : 
 - Démarrage du serveur.
 - Accès aux pages.
 - Execution de CGI.
 - Requêtes retournant une erreur 404.
 - Arrêt du serveur.
 
-### Gestion des clients en parallèle
-Comanche est capable de desservir plusieurs clients en simultané grâce à l'utilisation d'un fork pour chaque client qui se connecte.
+Cependant, lorsque l'on stoppe le serveur avec `^C`, l'action n'est pas recensée dans ce fichier.
 
-### Gestion du max de clients
-Comanche est capable aussi grâce au fichier de configuration de limiter le nombre de clients qui font une requête en simultané. Ce nombre de clients est configurable via le fichier de configuration.
-
-### Routes statiques
-Comanche gère un systeme de "routing" permettant la réécriture d'url comme sous apache2 via le module rewrite.
-
-### Routes avec expression régulière
-Afin de dynamiser le système de réécriture d'url, un systme utilsant les expressions régulières a été mis en place.
-
-### CGI statiques
-Les CGI sont utilisées afin de dynamiser les sites web que peux heberger comanche. Ce système permet de dynamiser les sites web grâce à l'utilisation de langages de programmation tels que python, bash, perl etc...
-
-### CGI avec expressions régulires
-L'utilisation des expressions régulières dans le paramétrages des cgi permet de généraliser les url vers l'execution des scripts. Cette pratique permet tout comme pour les routes de simplifier l'accès à celles-ci.
-
-### Paramtres de cgi
-Les paramètres permettent de dynamiser d'avantage le rendu des pages. Malheureusement, dans cette version les paramètres des cgi ne sont pas pris en compte. [En savoir plus sur les CGI](http://www.ietf.org/rfc/rfc3875)
+##Traitement des requêtes en parallèle
+Le serveur BlackPerl gère bien évidemment les requetes multiples. Il est capable de desservir plusieurs clients simultanément grâce à l'utilisation d'un processus pour chaque client.
 
 
-Développement
+Fonctionnement
 =============
 
-Implémentation
+##Lancement du serveur
 --------------
 
-### Détermination du type du fichier à utiliser
-Afin de répondre correctement au protocole HTTP/1.1, comanche doit être capable de determiner le type mime de la ressource qui lui est demandé. Lors de l'implémentation, plusieurs méthodes peuvent être utilisées afin de répondre à cette demande : 
-- l'utilisation de modules permettant de determiner le type mime est une solution qui peut être envisagée mais cependant elle oblige l'utilisateur de comanche d'installer le module en question.
-- Une autre solution aurait été d'utiliser le fichier /etc/mime.types, cependant l'utilisation de ce fichier limite l'execution du serveur sur un systeme unix.
-- La dernière solution qui a donc été choisie était de determiner le type mime à partir de l'extention de la ressource. Dans le projet il y a donc une correspondance qui s'effectue entre l'extension et le mimetype écrit directement dans le code de comanche. 
+Pour lancer le serveur, il suffit d'executer la commande suivante : `./comanche start`.
+Celui-ci démarre si ce dernier n'est pas déjà lancé en vérifiant la présence du fichier caché qui contient son pid (sinon il le créé), puis charge la configuration (et échoue si un des paramètres de configuration est incorrect).
 
+Ensuite, le serveur crée le fichier comanche.log.
 
-### Accès aux processus
-L'accès aux processus se fait à l'aide de la comande `fork`. Le script initialise le serveur dans un processus fils afin de rendre la main directement à l'utilisateur. Ensuite afin d'informer le serveur que l'on veut effectuer des actions, on utilise 4 signaux :
--    $SIG{CHLD} : permettant d'indiquer au proccesus père (le serveur) la mort d'un fils (d'un client) 
--    $SIG{USR1} : permet d'obtenir les informations sur le serveur
--    $SIG{QUIT} : permet d'indiquer au serveur qu'il doit s'arrêter
--    $SIG{HUP}  : permet de recharger la configuration du serveur. 
+##Status du serveur
+--------------
+Pour connaitre l'etat du serveur et obtenir des informations tel que son PID, le nombre de requetes recues et traitées, le nombre d'ouvriers actifs suivi de leurs PID, il est nécessaire d'executer la commande suivante : `./comanche status`.
 
-### Fichier de configuration
-Le fichier de configuration est lu par comanche afin de régler quelques variables comme par exemple le port d'écoute du serveur. Ces paramètres sont stockés dans un hash sous la forme : 
-- $conf{global}{...} pour les paramètres globaux tels que le port, le fichier par défaut, etc...
-- $conf{routes}{...} pour les paramètres de type "route ma_route to dossier_dest"
-- $conf{exec}{...} pour les paramètres de type "exec unCGI from un_dossier"
-La procédure est lancée au demarrage du serveur ainsi lorsque l'on demande au serveur de recharger la configuration via la commande `./comanche reload`
+##Fermeture du serveur
+--------------
+
+La fermeture peut-etre déclenchée par deux actions différentes : 
+  - Soit en executant la commande `./comanche stop`
+  - Soit à l'aide de `^C`
+A la fermeture du serveur, celui-ci supprime le fichier caché contenant son pid pour le prochain lancement.
