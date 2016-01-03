@@ -12,7 +12,7 @@ $cmd = $ARGV[0];
 @args = ('start', 'stop', 'status');
 
 # On sort si la commande n'est pas correcte
-die 'Usage: $0 <start|stop|status>\n' unless(grep { $cmd eq $_ } @args);
+die "Usage: $0 <start|stop|status>\n" unless(grep { $cmd eq $_ } @args);
 
 # Nom du serveur
 $SERVER_NAME = 'blackPerl';
@@ -88,7 +88,7 @@ sub load_config
 			}
 			elsif ($key eq 'clients')
 			{
-				die("$error Nombre de clients invalide (requiert un entier) \n") unless($val =~ /\d+/);
+				die("$error Nombre de clients invalide (requiert un entier > 0) \n") unless($val =~ /\d+/ && $val > 0);
 			}
 			# A ne pas vérifier car vérification dynamique pendant l'utilisation du serveur
 			# elsif ($key eq "index") {}
@@ -321,9 +321,10 @@ sub list_folder
 sub supervise
 {
 	# On ouvre le fichier de log pour écrire dedans, s'il n'existe pas, il est créé
-	open LOG, '>>' . $conf{'sets'}{'logfile'} and autoflush LOG 1;
+	open LOG, '>>' . $conf{'sets'}{'logfile'} or die "open: $!";
+	autoflush LOG 1;
 	# On lis les informations dans la fifo
-	open(WORKERS, "<$fifo_supervisor");
+	open(WORKERS, "<$fifo_supervisor") or die "open: $!";
 	# Le superviseur écrit ce qu'il reçoit dans le fichier de log
 	$, = ";";
 	while (<WORKERS>)
@@ -332,9 +333,9 @@ sub supervise
 	}
 	$, = "";
 	# On ferme la lecture de la fifo
-	close(WORKERS);
+	close(WORKERS) or die "close: $!";
 	# On ferme le fichier de log
-	close(LOG);
+	close(LOG) or die "close: $!";
 	# On ferme le superviseur
 	exit(0);
 }
@@ -441,10 +442,13 @@ sub create_server
 	listen (SERVER, SOMAXCONN) or die ("listen: $!");
 
 	# On crée la fifo pour le status
-	mkfifo($fifo_status, 0666);
+	mkfifo($fifo_status, 0666) unless(-e $fifo_status);
 	
 	# On crée le superviseur et sa fifo
-	mkfifo($fifo_supervisor, 0666);
+	mkfifo($fifo_supervisor, 0666) unless (-e $fifo_supervisor);
+	
+	# On crée le fichier de log s'il n'existe pas
+	open LOG, '>>' . $conf{'sets'}{'logfile'} and close LOG or die "create logfile: $!";
 	
 	# On inscrit le pid du serveur dans un fichier
 	$server_pid = $$;

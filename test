@@ -1,5 +1,0 @@
-#!/usr/bin/perl
-
-$url = "http://webmaster.iu.edu/";
-print "Location: $url\n\n";
-
