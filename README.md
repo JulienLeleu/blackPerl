@@ -4,8 +4,8 @@ Projet
 Binôme
 ------
 
-- Maxime Caboche
-- Fouad Zairi
+- Edouard CATTEZ
+- Julien LELEU
 
 Résumé
 ------
