@@ -1,4 +1,4 @@
-Projet
+Serveur web en Perl - Black Perl v1.0
 ======
 
 Binôme
@@ -7,7 +7,7 @@ Binôme
 - Edouard CATTEZ
 - Julien LELEU
 
-Résumé
+Tâches accomplies
 ------
   - [X] gestion du port d'écoute
   - [X] protocole HTTP/1.1
