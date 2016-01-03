@@ -18,14 +18,11 @@ die 'Usage: $0 <start|stop|status>\n' unless(grep { $cmd eq $_ } @args);
 $SERVER_NAME = 'blackPerl';
 
 # Version du serveur
-$SERVER_VERSION = 'blackPerl v1.0';
+$SERVER_VERSION = 'v1.0';
 
 # On stocke le processus du serveur (le père) dans un fichier caché à la racine du serveur
 $SERVER_FILE = '.serv_pid';
 $server_pid;
-
-# On stocke le processus du superviseur
-$supervisor_pid;
 
 # Ports minimal et maximal
 $PORT_MIN = 1;
@@ -72,8 +69,8 @@ sub get_server_pid
 # Charge la configuration du serveur
 sub load_config
 {
-	open CONFIG, "comanche.conf" or die "open: $!\n";
-	$error = "[Erreur de configuration]";
+	open CONFIG, 'comanche.conf' or die "open: $!\n";
+	$error = '[Erreur de configuration]';
 	while(<CONFIG>)
 	{
 		# La ligne est du type "set <key> <value>"
@@ -81,15 +78,15 @@ sub load_config
 		{
 			($key, $val) = ($1, $2);
 			# La clé peut valoir (port, error, index, logfile, clients)
-			if ($key eq "port")
+			if ($key eq 'port')
 			{
 				die "$error Port $val invalide (le port doit etre compris entre $PORT_MIN et $PORT_MAX)\n" unless($val =~ /[\d+]/ && $val >=$PORT_MIN && val <= $PORT_MAX);
 			}
-			elsif ($key eq "error")
+			elsif ($key eq 'error')
 			{
 				die	"$error Fichier d'erreur introuvable\n" unless(-f $val);
 			}
-			elsif ($key eq "clients")
+			elsif ($key eq 'clients')
 			{
 				die("$error Nombre de clients invalide (requiert un entier) \n") unless($val =~ /\d+/);
 			}
@@ -112,7 +109,7 @@ sub load_config
 				($key, $val) = ($1, $2);
 				$conf{'exec'}{$key} = $val;
 			}
-			# On envoit la clé dans une map générale de clé "rules"
+			# On envoit la clé dans une liste générale de clé "rules"
 			# Ce système permet de conserver l'ordre d'exécution des règles
 			# telles qu'elles ont été écrites dans le fichier
 			push(@{$conf{'rules'}}, $key);
@@ -268,25 +265,20 @@ sub send_file
 			send_error(415);
 		}
 	}
-	close_and_exit();
 }
 
 # Envoie une erreur HTTP au client via le code HTTP en paramètre
 sub send_error
 {
 	$default_page = $conf{'sets'}{'error'};
-	($code, $continue, $req, $file) = @_;
+	($code, $req, $file) = @_;
 	$error = $HTTP{$code};
-	
-	if ($req and $file)
-	{
-		info("get-s", get_ip_client(), $req, $file, $code);
-	}
 	
 	# Si le code d'erreur est 404 et qu'on a une page déjà établie, on l'affiche
 	# Dans le cas contraire, on crée une page d'erreur dynamiquement
 	if ($code == 404 and -e $default_page)
 	{
+		info("get-s", get_ip_client(), $req, $file, $code);
 		send_header($code, $error, mimetype($default_page), (-s $default_page));
 		print_file($default_page);
 	}
@@ -296,20 +288,17 @@ sub send_error
 		send_header($code, $error, 'text/html', length($html));
 		print CLIENT $html;
 	}
-	# Si le serveur doit gérer lui même le cas d'erreur (ex: HTTP 503), on en ferme pas son processus
-	close_and_exit() unless $continue;
-	return 1;
 }
 
 # Génère une page pour la navigation des dossiers si le dossier ne contient pas de fichier par défaut (type index.html)
 sub list_folder
 {
 	($dir, $req) = @_;
-	@folder = split("/", $dir);
+	@folder = split('/', $dir);
 	$parent = join('/', ($folder[0]..$folder[-1]));
 	my $reponse = "<html><head><title>$SERVER_NAME - $dir</title></head>". "<body><h1>Index of : $req</h1><hr/><ul>";
 
-	opendir(REP,"$dir") or die "opendir: $!";
+	opendir(REP, $dir) or die "opendir: $!";
 	my @liste = sort readdir(REP);
 	closedir REP;
 
@@ -324,16 +313,15 @@ sub list_folder
 		}
 	}
 
-	$reponse .= "</ul><hr><p>$SERVER_VERSION</p></body></html>";
+	$reponse .= "</ul><hr><p>$SERVER_NAME $SERVER_VERSION</p></body></html>";
 	return $reponse;
 }
 
-# Pour le superviseur qui lis dans la fifo et qui écrit dans le fichier de log
+# Le superviseur lis dans la fifo et écrit dans le fichier de log
 sub supervise
 {
-	print "[$$] Je supervise les logs !\n";
 	# On ouvre le fichier de log pour écrire dedans, s'il n'existe pas, il est créé
-	open LOG, ">>" . $conf{'sets'}{'logfile'} and autoflush LOG 1;
+	open LOG, '>>' . $conf{'sets'}{'logfile'} and autoflush LOG 1;
 	# On lis les informations dans la fifo
 	open(WORKERS, "<$fifo_supervisor");
 	# Le superviseur écrit ce qu'il reçoit dans le fichier de log
@@ -343,7 +331,6 @@ sub supervise
 		print LOG get_date(), $_;
 	}
 	$, = "";
-	print "[$$] J'arrête de superviser\n";
 	# On ferme la lecture de la fifo
 	close(WORKERS);
 	# On ferme le fichier de log
@@ -382,7 +369,7 @@ sub get_date
 }
 
 # Permet d'ajouter les événements au fichier de log définit dans la configuration
-# en envoyant l'information au superviseur du journal
+# en envoyant l'information au superviseur du journal via la fifo
 sub info
 {
 	$, = ";";
@@ -427,12 +414,11 @@ sub accept_client
 			# On renvoie l'erreur 503 si la requête ne peut être traitée par le serveur à cause d'un surplus de client
 			else
 			{
-				send_error(503, 1);
+				send_error(503);
 			}
 		}
 		elsif ($pid == 0)
 		{
-			print 'Connexion d\'un client. Numéro de processus: ', $$, "\n";
 			return CLIENT;
 		}
 	}
@@ -444,12 +430,6 @@ sub create_server
 {	
 	# On charge la configuration
 	load_config();
-	
-	# On inscrit le pid du serveur dans un fichier
-	$server_pid = $$;
-	open(WRITER, ">$SERVER_FILE") and autoflush WRITER 1;
-	print WRITER $server_pid;
-	close(WRITER);
 	
 	$port = $conf{'sets'}{'port'};
 	$caddr = sockaddr_in ($port, INADDR_ANY);
@@ -466,12 +446,18 @@ sub create_server
 	# On crée le superviseur et sa fifo
 	mkfifo($fifo_supervisor, 0666);
 	
+	# On inscrit le pid du serveur dans un fichier
+	$server_pid = $$;
+	open(WRITER, ">$SERVER_FILE") or die "open: $!";
+	autoflush WRITER 1;
+	print WRITER $server_pid;
+	close(WRITER) or die "close: $!";
+	
 	$pid = fork();
 
 	# On est dans le superviseur	
 	if ($pid == 0)
 	{
-		$supervisor_pid = $$;
 		supervise();
 	}
 	# On est dans le répartiteur (serveur)
@@ -487,7 +473,7 @@ sub create_server
 
 		# On envoie au superviseur l'information comme quoi le serveur a démarré
 		info('start', 'local', $port , '', '');
-		print "$SERVER_VERSION (pid = $server_pid) démarré.\n";
+		print "$SERVER_NAME (pid = $server_pid) démarré.\n";
 	}
 }
 
@@ -515,14 +501,28 @@ sub run
 				remove_EOL;
 				if (not $_)
 				{
+					if ($method eq 'GET' && $http eq 'HTTP/1.1')
+					{
+						# On récupère le chemin réel de la ressource demandée par le client
+						($route, $file) = get_real_path($req);
+						# Si aucune erreur, on envoie le fichier au client
+						if (-e $file)
+						{
+							send_file($route, $file, $req);
+						}
+						# On renvoie l'erreur 404 si la ressource n'existe pas à l'emplacement prévue
+						else
+						{
+							send_error(404, $req, $file)
+						}
+					}
 					# On renvoie l'erreur 400 si la requête est mal formulée
-					send_error(400) unless ($method eq 'GET' && $http eq 'HTTP/1.1');
-					# On récupère le chemin réel de la ressource demandée par le client
-					($route, $file) = get_real_path($req);
-					# On renvoie l'erreur 404 si la ressource n'existe pas à l'emplacement prévue
-					send_error(404, 0, $req, $file) unless (-e $file);
-					# Si aucune erreur, on envoie le fichier au client
-					send_file($route, $file, $req);
+					else
+					{
+						send_error(400);
+					}
+					# L'ouvrier ferme le handle CLIENT et s'arrête
+					close_and_exit();
 				}
 			}
 		}
@@ -541,7 +541,6 @@ sub wait_children {
 # Arrêt du serveur lui-même (fonction appelée soit par ./comanche stop soit par ^C)
 sub stop
 {
-	print "[$$] Arrêt de $SERVER_VERSION en cours ...\n";
 	info('stop', 'local', $port , '', '');
 	# On ferme le superviseur
 	close SUPERVISOR;
@@ -567,7 +566,7 @@ sub status
 			"Requêtes :\n",
 			"\t- reçues : $req_received \n",
 			"\t- traitées : $req_processed \n",
-			"Clients: " . ($#client + 1) . "\n\t",
+			"Clients : " . ($#client + 1) . "\n\t",
 			@client, "\n";
 	$, = "";
 	close(WRITER) or die "close : $!";
